@@ -12,5 +12,11 @@ dependencies = [
     "requests",
 ]
 
+[project.optional-dependencies]
+dev = [
+    "pytest",
+    "responses",
+]
+
 [tool.setuptools.packages.find]
 include = ["netbox_inventree_sync*"]
