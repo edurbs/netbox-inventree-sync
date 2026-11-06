@@ -113,7 +113,14 @@ class SyncMapping(JobsMixin, NetBoxModel):
         super().save(*args, **kwargs)
         from netbox_inventree_sync.jobs import ReconcileJob
         if self.enabled:
-            ReconcileJob.enqueue_once(instance=self, interval=self.reconcile_interval_minutes)
+            # mapping_id must ride in the enqueue call: JobRunner stores run
+            # kwargs on the RQ entry and handle() replays them into run() for
+            # both the immediate first run and every rescheduled recurrence —
+            # without it the job dies with a TypeError the moment a worker
+            # picks it up.
+            ReconcileJob.enqueue_once(
+                instance=self, interval=self.reconcile_interval_minutes, mapping_id=self.pk
+            )
         else:
             self._cancel_reconcile_schedule()
 

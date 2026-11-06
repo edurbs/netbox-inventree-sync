@@ -50,6 +50,47 @@ from .test_engine import FakeClient
 ENDPOINT = '/api/company/'
 
 
+class RecurringScheduleKwargsTestCase(TestCase):
+    """The recurring ReconcileJob enqueued by ``SyncMapping.save()`` must carry
+    its run kwargs (``mapping_id``) into the RQ entry.
+
+    Regression pin: ``enqueue_once(instance, interval)`` alone stores no run
+    kwargs, so the immediate first run (and every rescheduled recurrence —
+    ``JobRunner.handle``'s finally-block forwards the same empty kwargs) died
+    with ``TypeError: ReconcileJob.run() missing 1 required positional
+    argument: 'mapping_id'`` the moment a worker picked it up.
+    """
+
+    def test_enabled_mapping_schedule_carries_run_kwargs(self):
+        from core.choices import JobStatusChoices
+
+        connection = InvenTreeInstance.objects.create(
+            name='sched', url='http://x.test', api_token='tok'
+        )
+        mapping = SyncMapping(
+            name='sched-mapping',
+            connection=connection,
+            netbox_content_type=ContentType.objects.get_for_model(Manufacturer),
+            inventree_endpoint=ENDPOINT,
+            enabled=True,
+        )
+        with self.captureOnCommitCallbacks(execute=True):
+            mapping.save()
+
+        job = (
+            ReconcileJob.get_jobs(mapping)
+            .filter(status__in=JobStatusChoices.ENQUEUED_STATE_CHOICES)
+            .first()
+        )
+        self.assertIsNotNone(job, 'enabling a mapping must enqueue a ReconcileJob')
+
+        import django_rq
+
+        rq_job = django_rq.get_queue(job.queue_name).fetch_job(str(job.job_id))
+        self.assertIsNotNone(rq_job, 'RQ entry must exist for the enqueued job')
+        self.assertEqual(rq_job.kwargs.get('mapping_id'), mapping.pk)
+
+
 class DeactivatingFakeClient(FakeClient):
     """A FakeClient whose endpoint advertises a writable boolean 'active'."""
 
