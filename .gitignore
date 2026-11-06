@@ -6,3 +6,5 @@ netbox/
 *.pyc
 data/
 .env
+# build residue from `pip install -e .` (scripts/setup_netbox.sh)
+*.egg-info/
