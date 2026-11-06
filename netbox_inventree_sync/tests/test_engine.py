@@ -47,17 +47,19 @@ def canonical_hash(payload):
 class FakeClient:
     """Stands in for :class:`~netbox_inventree_sync.sync.client.InvenTreeClient`.
 
-    Records every post/patch/match call and serves canned data; each
+    Records every post/patch/get/match call and serves canned data; each
     ``*_error`` slot turns that one verb into a raised exception.
     """
 
     def __init__(self):
         self.posts = []      # (endpoint, data)
         self.patches = []    # (endpoint, pk, data)
+        self.gets = []       # (endpoint, pk)
         self.matches = []    # (endpoint, field, value)
         self.match_results = []
         self.post_response = {'pk': 101, 'name': 'Acme'}
         self.patch_response = {'pk': 101, 'name': 'Acme'}
+        self.get_response = {'pk': 101, 'name': 'Acme'}
         self.post_error = None
         self.patch_error = None
         self.match_error = None
@@ -76,6 +78,10 @@ class FakeClient:
         if self.patch_error is not None:
             raise self.patch_error
         return json.loads(json.dumps(self.patch_response))
+
+    def get(self, endpoint, pk):
+        self.gets.append((endpoint, pk))
+        return json.loads(json.dumps(self.get_response))
 
     def match(self, endpoint, field, value):
         self.matches.append((endpoint, field, value))
@@ -352,7 +358,7 @@ class ReconcileMappingTestCase(TestCase):
             'adopted': 1,
             'failed': 0,
             'orphaned': 0,
-            'unchanged': 1,  # hash fast-path: the linked object costs no HTTP
+            'unchanged': 1,  # verify pass: remote matches the payload, no repair PATCH
         })
         self.assertEqual(self.fake.matches, [(ENDPOINT, 'name', 'Beta')])
         self.assertEqual(self.fake.posts, [])
