@@ -18,3 +18,15 @@ seeded API token is written to `.env` as `NETBOX_TOKEN`.
 
 Requires: Python 3.12 (a uv-managed install works — see `scripts/setup_netbox.sh`),
 Docker with compose v2.
+
+## Running plugin tests
+
+```bash
+NETBOX_CONFIGURATION=netbox.configuration_test \
+    netbox/venv/bin/python netbox/netbox/manage.py test netbox_inventree_sync -v 1
+```
+
+`setup_netbox.sh` provisions `netbox/netbox/netbox/configuration_test.py` for
+this: it mirrors the dev config but disables `DEBUG`, so the Django debug
+toolbar is not installed (with `DEBUG = True` every `manage.py test` run fails
+at the `debug_toolbar.E001` system check before any test executes).

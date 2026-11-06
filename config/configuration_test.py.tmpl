@@ -1,0 +1,24 @@
+####################################################################
+# Test-run configuration for netbox-inventree-sync development.
+#
+# scripts/setup_netbox.sh copies this file to
+# netbox/netbox/netbox/configuration_test.py (beside configuration.py,
+# inside the NetBox core package). It mirrors configuration.py (same
+# database, Redis, plugins) but disables DEBUG so the Django debug
+# toolbar is not installed: with the dev config's DEBUG = True the
+# toolbar is installed and every `manage.py test` run dies at the
+# debug_toolbar.E001 system check. The check's own suggested workaround
+# (DEBUG_TOOLBAR_CONFIG['IS_RUNNING_TESTS'] = False) cannot be used
+# here: NetBox's settings.py re-assigns DEBUG_TOOLBAR_CONFIG after
+# configuration load, so a config-side value never reaches Django
+# settings. Disabling DEBUG matches NetBox's own testing convention
+# (see its configuration_testing.py).
+#
+# Canonical test invocation:
+#   NETBOX_CONFIGURATION=netbox.configuration_test \
+#       netbox/venv/bin/python netbox/netbox/manage.py test netbox_inventree_sync
+####################################################################
+
+from netbox.configuration import *  # noqa: F401,F403
+
+DEBUG = False

@@ -6,6 +6,7 @@
 #   2. create netbox/venv on Python 3.12
 #   3. pip install -r netbox/requirements.txt
 #   4. copy config/configuration.py.tmpl -> netbox/netbox/netbox/configuration.py
+#      and config/configuration_test.py.tmpl -> configuration_test.py (test runs)
 #   5. docker compose up -d (Postgres + Redis) and wait for Postgres
 #   6. manage.py migrate
 #   7. scripts/seed_netbox.py  (admin user + API token -> .env)
@@ -70,6 +71,21 @@ fi
 if ! grep -q '^DEVELOPER = True' "$CONFIG_PY"; then
     printf "\n# Added by scripts/setup_netbox.sh (missing from older templates)\nDEVELOPER = True\n" \
         >> "$CONFIG_PY"
+fi
+# Test configuration for canonical plugin test runs (idempotent, kept if
+# present): the dev config's DEBUG = True installs the Django debug
+# toolbar, which fails every `manage.py test` invocation at the
+# debug_toolbar.E001 system check before any test executes. NetBox's own
+# convention for tests is a DEBUG-less configuration module (see its
+# configuration_testing.py); the template mirrors the live config minus
+# DEBUG. Run tests with:
+#   NETBOX_CONFIGURATION=netbox.configuration_test \
+#       "$VENV_PY" "$NETBOX_DIR/netbox/manage.py" test netbox_inventree_sync
+CONFIG_TEST_PY="$NETBOX_DIR/netbox/netbox/configuration_test.py"
+if [[ -f "$CONFIG_TEST_PY" ]]; then
+    echo ">> $CONFIG_TEST_PY already present, keeping it"
+else
+    cp config/configuration_test.py.tmpl "$CONFIG_TEST_PY"
 fi
 
 # --- 5. Backing services (Postgres + Redis) -----------------------------------
