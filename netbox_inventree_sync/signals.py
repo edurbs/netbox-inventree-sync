@@ -1,19 +1,26 @@
 """Signal wiring: NetBox object saves/deletes become ObjectSyncJob rows.
 
 :func:`register_receivers` binds ``post_save``/``post_delete`` receivers to
-the content types of every ENABLED mapping, and keeps those bindings
-current through three triggers: every
+the content types of every mapping — enabled or not — and keeps those
+bindings current through three triggers: every
 :class:`~netbox_inventree_sync.models.SyncMapping` save (one cheap query
 plus set arithmetic, fully idempotent), ``post_migrate`` (fresh or
 just-migrated database), and the first request in a process (a server
-restarting with existing enabled mappings — ``AppConfig.ready()`` may not
-touch the database, so the initial binding build is deferred off the boot
-path).
+restarting with existing mappings — ``AppConfig.ready()`` may not touch the
+database, so the initial binding build is deferred off the boot path).
 
-The binding set is only an event pre-filter: each receiver re-queries the
-enabled mappings for the sender's content type at event time, so a stale
-binding (a mapping disabled or deleted after it was made) can never enqueue
-work — it only means a superfluous query.
+Bindings are ONLY an event pre-filter: each receiver re-queries the enabled
+mappings for the sender's content type at event time, so no binding can
+ever produce a wrong enqueue — a disabled or deleted mapping's content type
+costs at most one wasted query per save. Binding the union of ALL mapped
+content types (not just the enabled ones) is what keeps multi-worker
+deployments correct: the mapping-save rebuild runs in only the worker that
+handled the save, and ``post_migrate`` runs in only the migrate process, so
+restricting bindings to then-enabled mappings would permanently miss a
+content type on every worker that bootstrapped before a mapping for it was
+enabled. The residual staleness window — a content type's FIRST-EVER
+mapping creation, on the workers that did not handle that save — is covered
+by the creating worker's rebuild plus the recurring reconcile backstop.
 
 Two hard invariants:
 
@@ -67,7 +74,7 @@ def register_receivers():
     called from ``ready()`` the hooks alone are connected and the bindings
     converge through any of three later triggers: ``post_migrate`` (migrate
     runs, test-database creation), the first request in the process (a
-    server restarting with existing enabled mappings), or the next
+    server restarting with existing mappings, enabled or not), or the next
     SyncMapping save.
     """
     post_migrate.connect(_handle_post_migrate, dispatch_uid=_POST_MIGRATE_UID)
@@ -99,21 +106,27 @@ def _delete_uid(content_type_id):
 
 
 def _rebuild_bindings():
-    """Bind/unbind the object-sync receivers to match the enabled mappings."""
-    enabled = set(
-        SyncMapping.objects.filter(enabled=True)
+    """Bind/unbind the object-sync receivers to match the mapped content types.
+
+    Binds the union of ALL mapped content types — enabled or not — because
+    the receivers apply the enabled check per event (see the module
+    docstring for the cross-worker rationale). A content type leaves the
+    binding set only when no mapping references it at all.
+    """
+    mapped = set(
+        SyncMapping.objects
         .values_list('netbox_content_type_id', flat=True)
         .distinct()
     )
-    for content_type_id in set(_bound) - enabled:
+    for content_type_id in set(_bound) - mapped:
         model = _bound.pop(content_type_id)
         post_save.disconnect(_handle_object_saved, sender=model, dispatch_uid=_save_uid(content_type_id))
         post_delete.disconnect(_handle_object_deleted, sender=model, dispatch_uid=_delete_uid(content_type_id))
-    for content_type_id in enabled - set(_bound):
+    for content_type_id in mapped - set(_bound):
         model = ContentType.objects.get(pk=content_type_id).model_class()
         if model is None:
             logger.warning(
-                f'content type #{content_type_id} of an enabled mapping has no '
+                f'content type #{content_type_id} of a mapping has no '
                 'model; not binding sync receivers for it'
             )
             continue
@@ -183,8 +196,11 @@ def _handle_mapping_saved(sender, instance, **kwargs):
     """post_save on SyncMapping → rebuild the object-sync bindings.
 
     Rebuilt on every mapping save, not only on enabled-flag changes: the
-    rebuild is idempotent and cheap, and this also converges mappings
-    whose content type changed or that were created by any code path.
+    rebuild is idempotent and cheap, and binding a newly mapped content
+    type must happen here regardless of the enabled flag. The other worker
+    processes miss this rebuild (its effects reach them only through their
+    own bootstrap triggers or the recurring reconcile — see the module
+    docstring).
     """
     try:
         _rebuild_bindings()
@@ -207,10 +223,10 @@ def _handle_request_started(sender, **kwargs):
 
     ``AppConfig.ready()`` may not touch the database and ``post_migrate``
     only fires on migrate runs, so a server that restarts with existing
-    enabled mappings gets its bindings here, once per process; afterwards
-    the SyncMapping save watcher keeps them current. (RQ worker processes
-    never serve requests — and never need these bindings: they run jobs,
-    whose engine writes only the plugin's own, guarded models.)
+    mappings — enabled or not — gets its bindings here, once per process;
+    afterwards the SyncMapping save watcher keeps them current. (RQ worker
+    processes never serve requests — and never need these bindings: they
+    run jobs, whose engine writes only the plugin's own, guarded models.)
     """
     global _bootstrapped
     if _bootstrapped:

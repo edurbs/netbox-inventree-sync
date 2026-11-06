@@ -124,8 +124,15 @@ class SignalAndJobTestCase(TestCase):
     def test_disabled_mapping_no_job(self):
         mapping = self.make_mapping(enabled=False)
 
+        # Pre-filter semantics: the disabled mapping's content type IS
+        # bound (bindings are the union of all mapped content types), …
+        self.assertIn(self.manufacturer_ct.pk, signals._bound)
+        self.assertIs(signals._bound[self.manufacturer_ct.pk], Manufacturer)
+
         mfr = self.make_manufacturer(name='Beta')
 
+        # … but the receiver's event-time re-check finds no enabled
+        # mapping, so the save enqueues nothing.
         self.assertEqual(self.object_sync_jobs(mapping).count(), 0)
 
     def test_delete_signal_deactivate_path(self):
@@ -303,3 +310,21 @@ class SignalAndJobTestCase(TestCase):
         self.assertEqual(ctx.exception.code, 1)
         synced = SyncedObject.objects.get(mapping=mapping, netbox_object_id=mfr.pk)
         self.assertEqual(synced.status, SyncStatusChoices.FAILED)
+
+    def test_command_reconcile_job_error_exits_1(self):
+        mapping = self.make_mapping(enabled=True)
+
+        # run() blowing up before producing counters must exit 1 — an
+        # errored job carries no stats, so a stats-only check would pass.
+        errors = StringIO()
+        with mock.patch.object(
+            ReconcileJob, 'run', side_effect=RuntimeError('engine exploded'),
+        ):
+            with self.assertRaises(SystemExit) as ctx:
+                call_command(
+                    'inventree_sync', mapping=mapping.name, reconcile=True,
+                    stdout=StringIO(), stderr=errors,
+                )
+
+        self.assertEqual(ctx.exception.code, 1)
+        self.assertIn('engine exploded', errors.getvalue())

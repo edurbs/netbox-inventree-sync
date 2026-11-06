@@ -127,6 +127,8 @@ class Command(BaseCommand):
             f'Synced {sync_mapping.netbox_content_type} #{object_id} '
             f'({status}, job #{job.pk} {job.status})'
         )
+        if job.status != 'completed':
+            self.stderr.write(f'Job #{job.pk} {job.status}: {job.error}')
         return job
 
     def _reconcile(self, sync_mapping):
@@ -136,6 +138,11 @@ class Command(BaseCommand):
             mapping_id=sync_mapping.pk,
             immediate=True,
         )
+        if job.status != 'completed':
+            # run() blew up before producing counters; without this guard
+            # an errored job (empty stats) would exit 0.
+            self.stderr.write(f'Reconcile job #{job.pk} {job.status}: {job.error}')
+            sys.exit(1)
         stats = (job.data or {}).get('stats', {})
         self.stdout.write(
             f'Reconciled {sync_mapping.name!r}: '
