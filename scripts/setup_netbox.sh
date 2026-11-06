@@ -5,7 +5,7 @@
 #   1. shallow-clone NetBox at tag v4.7.4 into ./netbox
 #   2. create netbox/venv on Python 3.12
 #   3. pip install -r netbox/requirements.txt
-#   4. copy config/configuration.py.tmpl -> netbox/netbox/configuration.py
+#   4. copy config/configuration.py.tmpl -> netbox/netbox/netbox/configuration.py
 #   5. docker compose up -d (Postgres + Redis) and wait for Postgres
 #   6. manage.py migrate
 #   7. scripts/seed_netbox.py  (admin user + API token -> .env)
