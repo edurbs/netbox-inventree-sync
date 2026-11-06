@@ -373,6 +373,90 @@ class ReconcileDriftTestCase(TestCase):
         self.assertEqual(len(self.fake.patches), 1)
 
 
+class VerifyRemoteContainmentTestCase(TestCase):
+    """A payload-build failure (stale pairing) fails one link, not the job."""
+
+    @classmethod
+    def setUpTestData(cls):
+        cls.connection = InvenTreeInstance.objects.create(
+            name='Primary InvenTree',
+            url='http://inventree.test',
+            api_token=FAKE_TOKEN,
+        )
+        manufacturer = Manufacturer.objects.create(name='Acme', slug='acme')
+        site = Site.objects.create(name='HQ', slug='hq')
+        role = DeviceRole.objects.create(name='Server', slug='server')
+        device_type = DeviceType.objects.create(
+            manufacturer=manufacturer, model='X-1', slug='x-1',
+        )
+        device = Device.objects.create(
+            name='dev1', device_type=device_type, role=role, site=site,
+        )
+        cls.referencing = InventoryItem.objects.create(
+            device=device, manufacturer=manufacturer, name='PSU',
+        )
+        cls.plain = InventoryItem.objects.create(device=device, name='Fan')
+        cls.mapping = SyncMapping.objects.create(
+            name='Inventory items to parts',
+            connection=cls.connection,
+            netbox_content_type=ContentType.objects.get_for_model(InventoryItem),
+            inventree_endpoint=PART_ENDPOINT,
+            enabled=True,
+        )
+        SyncFieldPair.objects.create(
+            mapping=cls.mapping, netbox_field='name', inventree_field='name',
+        )
+        SyncFieldPair.objects.create(
+            mapping=cls.mapping, netbox_field='manufacturer', inventree_field='category',
+        )
+        # The pairing this link was last synced under has since been
+        # disabled: the payload can no longer be built for it.
+        cls.pairing = SyncMapping.objects.create(
+            name='Manufacturers to companies',
+            connection=cls.connection,
+            netbox_content_type=ContentType.objects.get_for_model(Manufacturer),
+            inventree_endpoint=COMPANY_ENDPOINT,
+            enabled=False,
+        )
+        SyncFieldPair.objects.create(
+            mapping=cls.pairing, netbox_field='name', inventree_field='name',
+        )
+        cls.stale_link = SyncedObject.objects.create(
+            mapping=cls.mapping,
+            netbox_object_id=cls.referencing.pk,
+            inventree_pk=50,
+            status=SyncStatusChoices.SYNCED,
+            last_payload_hash='stale',
+        )
+
+    def test_verify_remote_pairing_failure_contained(self):
+        fake = FakeClient()
+        engine = SyncEngine(self.connection, client=fake)
+
+        # Must not raise out of reconcile_mapping.
+        stats = engine.reconcile_mapping(self.mapping)
+
+        self.stale_link.refresh_from_db()
+        self.assertEqual(self.stale_link.status, SyncStatusChoices.FAILED)
+        self.assertIn('pairing', self.stale_link.last_error.lower())
+        # The payload build failed before any verification traffic existed.
+        self.assertEqual(fake.gets, [])
+        # The healthy unlinked object was still processed to completion.
+        plain_link = SyncedObject.objects.get(
+            mapping=self.mapping, netbox_object_id=self.plain.pk,
+        )
+        self.assertEqual(plain_link.status, SyncStatusChoices.SYNCED)
+        self.assertEqual(fake.posts, [(PART_ENDPOINT, {'name': 'Fan', 'category': None})])
+        self.assertEqual(stats, {
+            'created': 1,
+            'updated': 0,
+            'adopted': 0,
+            'failed': 1,
+            'orphaned': 0,
+            'unchanged': 0,
+        })
+
+
 class ReconcileMissingObjectsTestCase(TestCase):
     """Reconcile flags gone NetBox objects; orphaned links are never clobbered."""
 

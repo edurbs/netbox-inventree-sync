@@ -198,42 +198,59 @@ class SyncEngine:
         fields (the freshly built payload) against it; any difference is
         repaired by PATCHing the expected values back. A missing remote
         (HTTP 404) counts as drift and re-creates the object from the
-        payload. Returns ``{'drifted': bool}``; failures to verify or
-        repair are contained on the link row like any other error.
+        payload. Returns ``{'drifted': bool, 'failed': bool}`` — nothing
+        ever escapes this method, not even a payload-build failure such as
+        a pairing mapping disabled after the link last synced, which fails
+        THIS link exactly like ``sync_object`` would instead of aborting
+        the whole reconcile job.
         """
         if synced.inventree_pk is None:
-            return {'drifted': False}
+            return {'drifted': False, 'failed': False}
         netbox_obj = self._fetch_netbox_object(mapping, synced.netbox_object_id)
         if netbox_obj is None:
             # NetBox object gone: nothing to verify against — the delete
             # pass (handle_delete) owns that transition.
-            return {'drifted': False}
-        payload = self._build_payload(mapping, netbox_obj)
+            return {'drifted': False, 'failed': False}
+        try:
+            payload = self._build_payload(mapping, netbox_obj)
+        except (
+            InvenTreeClientError,
+            requests.RequestException,
+            PairingResolutionError,
+        ) as exc:
+            self._record_failure(synced, exc)
+            return {'drifted': False, 'failed': True}
         digest = canonical_hash(payload)
         try:
             remote = self.client.get(mapping.inventree_endpoint, synced.inventree_pk)
         except (InvenTreeClientError, requests.RequestException) as exc:
             if isinstance(exc, InvenTreeClientError) and exc.status == 404:
-                self._recreate(mapping, synced, payload, digest)
-                return {'drifted': True}
+                try:
+                    self._recreate(mapping, synced, payload, digest)
+                except (InvenTreeClientError, requests.RequestException) as recreate_exc:
+                    self._record_failure(synced, recreate_exc, payload)
+                return {
+                    'drifted': True,
+                    'failed': synced.status == SyncStatusChoices.FAILED,
+                }
             self._record_failure(synced, exc, payload)
-            return {'drifted': False}
+            return {'drifted': False, 'failed': True}
         drift = {
             field: value for field, value in payload.items()
             if not self._remote_field_matches(remote.get(field), value)
         }
         if not drift:
-            return {'drifted': False}
+            return {'drifted': False, 'failed': False}
         try:
             response = self.client.patch(
                 mapping.inventree_endpoint, synced.inventree_pk, payload,
             )
         except (InvenTreeClientError, requests.RequestException) as exc:
             self._record_failure(synced, exc, payload)
-            return {'drifted': True}
+            return {'drifted': True, 'failed': True}
         self._mark_synced(synced, digest)
         self._log(synced, SyncActionChoices.UPDATE, payload, response_body=response)
-        return {'drifted': True}
+        return {'drifted': True, 'failed': False}
 
     def reconcile_mapping(self, mapping) -> dict:
         """Sync every object in ``mapping``'s scope; return outcome counts.
