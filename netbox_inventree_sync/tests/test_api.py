@@ -22,7 +22,7 @@ from users.models import User
 
 from netbox_inventree_sync.api import views as api_views
 from netbox_inventree_sync.jobs import ReconcileJob
-from netbox_inventree_sync.models import InvenTreeInstance, SyncMapping
+from netbox_inventree_sync.models import InvenTreeInstance, SyncFieldPair, SyncMapping
 from netbox_inventree_sync.sync import validation
 from netbox_inventree_sync.sync.client import InvenTreeClientError, InventreeFieldSpec
 
@@ -256,6 +256,107 @@ class MappingWriteTestCase(PluginAPITestCase):
             {(p.netbox_field, p.transform) for p in mapping.field_pairs.all()},
             {('manufacturer', 'str'), ('part_id', 'none')},
         )
+
+
+class MappingUpdateTestCase(PluginAPITestCase):
+    """Update-path pair writes — the flows the mapping builder (Task 13) uses.
+
+    ``field_pairs`` on a write replaces the mapping's full pair set; absent,
+    the existing pairs ride along untouched; and a rejected update applies
+    nothing (validation runs before any persistence).
+    """
+
+    def setUp(self):
+        super().setUp()
+        self.mapping = SyncMapping.objects.create(
+            name='Inventory items to parts',
+            connection=self.connection,
+            netbox_content_type=self.inventoryitem_ct,
+            inventree_endpoint='/api/part/',
+            enabled=False,
+        )
+        self.initial_pair = SyncFieldPair.objects.create(
+            mapping=self.mapping,
+            netbox_field='part_id',
+            inventree_field='IPN',
+            transform='none',
+        )
+
+    def payload(self, **overrides):
+        payload = {
+            'name': 'Inventory items to parts',
+            'connection': self.connection.pk,
+            'netbox_content_type': 'dcim.inventoryitem',
+            'inventree_endpoint': '/api/part/',
+            'enabled': False,
+        }
+        payload.update(overrides)
+        return payload
+
+    def detail_url(self):
+        return self.url('syncmapping-detail', pk=self.mapping.pk)
+
+    def test_put_with_pairs_replaces_them_and_recomputes_transforms(self):
+        payload = self.payload(field_pairs=[
+            {'netbox_field': 'name', 'inventree_field': 'description'},
+            {'netbox_field': 'manufacturer', 'netbox_subfield': 'name', 'inventree_field': 'keywords'},
+        ])
+        with mock.patch.object(validation, 'InvenTreeClient', StubInvenTreeClient):
+            response = self.client.put(self.detail_url(), payload, format='json')
+
+        self.assertEqual(response.status_code, 200, response.content)
+
+        # The response carries the new pair set, transforms recomputed.
+        self.assertEqual(
+            {(pair['netbox_field'], pair['transform']) for pair in response.json()['field_pairs']},
+            {('name', 'none'), ('manufacturer', 'str')},
+        )
+
+        # Persisted state matches: a full replace, not an append — the old
+        # pair row is gone.
+        pairs = SyncFieldPair.objects.filter(mapping=self.mapping).order_by('netbox_field')
+        self.assertEqual(
+            [(p.netbox_field, p.inventree_field, p.transform) for p in pairs],
+            [('manufacturer', 'keywords', 'str'), ('name', 'description', 'none')],
+        )
+        self.assertFalse(SyncFieldPair.objects.filter(pk=self.initial_pair.pk).exists())
+
+    def test_put_without_pairs_keeps_existing_pairs(self):
+        payload = self.payload(name='Inventory items to parts v2')
+        with mock.patch.object(validation, 'InvenTreeClient', StubInvenTreeClient):
+            response = self.client.put(self.detail_url(), payload, format='json')
+
+        self.assertEqual(response.status_code, 200, response.content)
+        self.assertEqual(response.json()['name'], 'Inventory items to parts v2')
+
+        # The scalar update went through; the untouched pair keeps its row
+        # (same pk — kept, not silently recreated).
+        pairs = response.json()['field_pairs']
+        self.assertEqual([pair['netbox_field'] for pair in pairs], ['part_id'])
+        self.assertEqual(pairs[0]['id'], self.initial_pair.pk)
+        pair = SyncFieldPair.objects.get(pk=self.initial_pair.pk)
+        self.assertEqual((pair.netbox_field, pair.inventree_field, pair.transform),
+                         ('part_id', 'IPN', 'none'))
+
+    def test_update_with_incompatible_pair_keeps_existing(self):
+        payload = self.payload(field_pairs=[
+            {'netbox_field': 'discovered', 'inventree_field': 'description'},
+        ])
+        with mock.patch.object(validation, 'InvenTreeClient', StubInvenTreeClient):
+            response = self.client.put(self.detail_url(), payload, format='json')
+
+        self.assertEqual(response.status_code, 400, response.content)
+        codes = [detail.code for detail in response.data['__all__']]
+        self.assertIn('incompatible', codes)
+
+        # Nothing was half-applied: the mapping and its pair are exactly as
+        # they were before the rejected write.
+        mapping = SyncMapping.objects.get(pk=self.mapping.pk)
+        self.assertEqual(mapping.name, 'Inventory items to parts')
+        pair = SyncFieldPair.objects.get(pk=self.initial_pair.pk)
+        self.assertEqual((pair.netbox_field, pair.inventree_field, pair.transform),
+                         ('part_id', 'IPN', 'none'))
+        self.assertEqual(SyncFieldPair.objects.filter(mapping=mapping).count(), 1)
 
 
 class SyncNowTestCase(PluginAPITestCase):
