@@ -70,10 +70,12 @@ class SyncMappingForm(NetBoxModelForm):
         label=_('Connection'),
     )
     # Only models with change logging can be synced: the engine consumes
-    # their change log entries. The plugin's own models and Django's
-    # internal apps never carry that feature, so the feature query
-    # already excludes them; the app_label exclusion is belt-and-braces
-    # against future feature additions to the plugin's models.
+    # their change log entries. The plugin's own models DO carry that
+    # NetBoxModel feature (SyncMapping change-logs too), so the
+    # app_label exclusion below IS load-bearing — without it the plugin's
+    # own models would be offered as sync targets. The signal layer
+    # would still refuse to enqueue for them (no feedback loops), but a
+    # mapping onto them could never do anything useful.
     netbox_content_type = ContentTypeChoiceField(
         queryset=ObjectType.objects.with_feature('change_logging').exclude(
             app_label='netbox_inventree_sync',

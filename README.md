@@ -71,11 +71,19 @@ Requires: Python 3.12 (a uv-managed install works — see
 5. **Sync now** — the *Sync now* button on a mapping (or
    `POST /api/plugins/netbox_inventree_sync/mappings/<id>/sync/`)
    enqueues a one-shot reconcile in addition to the recurring schedule.
+   This works on *disabled* mappings too (deliberate): the action runs
+   regardless of the `enabled` flag, so a mapping can be exercised once
+   before its schedule and event-driven pushes are turned on.
 
 From then on, saving a mapped NetBox object enqueues a push, and deleting
 one deactivates (never deletes) the remote counterpart. Status per object:
 *Plugins → InvenTree Sync → Synced Objects*; every push attempt is logged
 in *Sync Log*.
+
+> **Sync log retention**: `SyncLogEntry` grows unboundedly — one row per
+> push attempt, reconcile included. There is no automatic retention in
+> v1; prune old rows manually if the table grows too large
+> (e.g. `SyncLogEntry.objects.filter(created__lt=...)` in a shell).
 
 ### Deterministic sync from the CLI
 
@@ -99,6 +107,11 @@ retries failed links, publishes unlinked NetBox objects through the
 mapping's match/adopt policy, and orphans links whose NetBox object is
 gone. Keep the interval short for busy catalogs (each pass GETs every
 linked remote object).
+
+Note on scale: the **first** reconcile after a mapping starts working
+publishes every mapped NetBox object that has no link yet — on a large
+catalog that is one InvenTree create per object, so expect a long first
+pass (and a correspondingly large first-pass sync log).
 
 ## Running plugin tests
 
