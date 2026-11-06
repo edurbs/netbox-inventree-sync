@@ -14,8 +14,7 @@ class NetBoxInvenTreeSyncConfig(PluginConfig):
     verbose_name = 'InvenTree Sync'
     description = 'Synchronize NetBox inventory data to InvenTree'
     version = __version__
-    # Plugin navigation/menu items are introduced in a later task.
-    # menu = ...
+    menu = 'navigation.menu'
 
     def ready(self):
         # Connect the sync signal wiring. This only connects signal hooks —

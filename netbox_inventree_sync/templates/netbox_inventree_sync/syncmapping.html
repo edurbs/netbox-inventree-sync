@@ -1,0 +1,54 @@
+{% extends 'generic/object.html' %}
+{% load render_table from django_tables2 %}
+
+{% block content %}
+  <div class="row mb-3">
+    <div class="col col-12 col-md-6">
+      <div class="card">
+        <h5 class="card-header">Mapping</h5>
+        <table class="table table-hover attr-table">
+          <tr>
+            <th scope="row">Name</th>
+            <td>{{ object.name }}</td>
+          </tr>
+          <tr>
+            <th scope="row">Connection</th>
+            <td>{{ object.connection|linkify }}</td>
+          </tr>
+          <tr>
+            <th scope="row">NetBox type</th>
+            <td>{{ object.netbox_content_type.app_label }}.{{ object.netbox_content_type.model }}</td>
+          </tr>
+          <tr>
+            <th scope="row">InvenTree endpoint</th>
+            <td>{{ object.inventree_endpoint }}</td>
+          </tr>
+          <tr>
+            <th scope="row">Match fields</th>
+            <td>{{ object.match_netbox_field|placeholder }} &rarr; {{ object.match_inventree_field|placeholder }}</td>
+          </tr>
+          <tr>
+            <th scope="row">Reconcile interval</th>
+            <td>{{ object.reconcile_interval_minutes }} minutes</td>
+          </tr>
+          <tr>
+            <th scope="row">Enabled</th>
+            <td>{% checkmark object.enabled %}</td>
+          </tr>
+          <tr>
+            <th scope="row">Description</th>
+            <td>{{ object.description|placeholder }}</td>
+          </tr>
+        </table>
+      </div>
+    </div>
+  </div>
+  <div class="row mb-3">
+    <div class="col col-md-12">
+      <div class="card">
+        <h5 class="card-header">Field pairs</h5>
+        {% render_table field_pairs_table %}
+      </div>
+    </div>
+  </div>
+{% endblock content %}
