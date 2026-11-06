@@ -11,7 +11,12 @@ Highlights:
   on unsaved :class:`~netbox_inventree_sync.models.SyncFieldPair`
   instances built from the posted data, so an incompatible mapping is
   rejected with HTTP 400 (carrying the validator's error codes) instead
-  of ever reaching the sync engine; on success each pair's
+  of ever reaching the sync engine; it then runs
+  :func:`~netbox_inventree_sync.sync.validation.validate_mapping_graph_for_write`
+  so a pair set closing a pairing cycle is rejected the same way. An
+  InvenTree unreachable during either check surfaces as the shared 502
+  :class:`~netbox_inventree_sync.api.exceptions.InvenTreeUnavailable`
+  (the failure is upstream, not in the request). On success each pair's
   ``transform`` is auto-set by the validator. When ``field_pairs`` is
   present on a write it replaces the mapping's full pair set; when
   absent (e.g. a PATCH) the existing pairs are left untouched.
@@ -19,16 +24,22 @@ Highlights:
 
 from django.contrib.contenttypes.models import ContentType
 from django.core.exceptions import ValidationError as DjangoValidationError
+from django.db import transaction
 from rest_framework import serializers
 from rest_framework.exceptions import ErrorDetail, ValidationError
 from rest_framework.settings import api_settings
 
 from netbox.api.fields import ContentTypeField
 from netbox.api.serializers import NetBoxModelSerializer
+from netbox_inventree_sync.api.exceptions import InvenTreeUnavailable
 from netbox_inventree_sync.models import (
     InvenTreeInstance, SyncFieldPair, SyncLogEntry, SyncMapping, SyncedObject,
 )
-from netbox_inventree_sync.sync.validation import validate_mapping
+from netbox_inventree_sync.sync.client import InvenTreeClientError
+from netbox_inventree_sync.sync.validation import (
+    validate_mapping,
+    validate_mapping_graph_for_write,
+)
 
 __all__ = (
     'InvenTreeInstanceSerializer',
@@ -96,23 +107,38 @@ class SyncMappingSerializer(NetBoxModelSerializer):
 
     def validate(self, data):
         pairs_data = data.get('field_pairs')
+        # The provisional mapping mirrors NetBox's own
+        # ValidatedModelSerializer: unsaved on create, the persisted
+        # instance patched with the posted attrs on update.
+        mapping = self.instance or SyncMapping()
+        for name, value in data.items():
+            if name != 'field_pairs':
+                setattr(mapping, name, value)
+        pairs = None
         if pairs_data is not None:
-            # Validate the posted pairs against live NetBox introspection and
-            # the endpoint's OPTIONS metadata (the InvenTree side is stubbed
-            # in tests via sync.validation.InvenTreeClient). The provisional
-            # mapping mirrors NetBox's own ValidatedModelSerializer: unsaved
-            # on create, the persisted instance patched with the posted attrs
-            # on update.
-            mapping = self.instance or SyncMapping()
-            for name, value in data.items():
-                if name != 'field_pairs':
-                    setattr(mapping, name, value)
+            # Validate the posted pairs against live NetBox introspection
+            # and the endpoint's OPTIONS metadata (the InvenTree side is
+            # stubbed in tests via sync.validation.InvenTreeClient).
             pairs = [SyncFieldPair(**attrs) for attrs in pairs_data]
             try:
-                validated_pairs = validate_mapping(mapping, pairs)
+                pairs = validate_mapping(mapping, pairs)
+            except InvenTreeClientError as exc:
+                # Upstream failure while validating: 502, exactly like the
+                # fields endpoint — the request is fine, InvenTree is not.
+                raise InvenTreeUnavailable(str(exc))
             except DjangoValidationError as exc:
                 raise self._drf_validation_error(exc)
-            data = {**data, 'field_pairs': validated_pairs}
+            data = {**data, 'field_pairs': pairs}
+        if pairs_data is not None or 'enabled' in data:
+            # Pairing-graph gate: a write that can change the graph (a new
+            # pair set adds edges; an enabled flip adds/removes a node)
+            # must not leave it cyclic.
+            try:
+                validate_mapping_graph_for_write(mapping, pairs)
+            except InvenTreeClientError as exc:
+                raise InvenTreeUnavailable(str(exc))
+            except DjangoValidationError as exc:
+                raise self._drf_validation_error(exc)
         return super().validate(data)
 
     def create(self, validated_data):
@@ -130,12 +156,17 @@ class SyncMappingSerializer(NetBoxModelSerializer):
 
     @staticmethod
     def _save_pairs(mapping, pairs):
-        """Persist ``pairs`` as the mapping's complete pair set."""
-        mapping.field_pairs.all().delete()
-        for pair in pairs:
-            pair.pk = None
-            pair.mapping = mapping
-            pair.save()
+        """Persist ``pairs`` as the mapping's complete pair set, atomically.
+
+        The full replace (delete-then-create) is one transaction so a
+        failure midway cannot leave the mapping with half its pairs.
+        """
+        with transaction.atomic():
+            mapping.field_pairs.all().delete()
+            for pair in pairs:
+                pair.pk = None
+                pair.mapping = mapping
+                pair.save()
 
     @staticmethod
     def _drf_validation_error(exc):
@@ -144,7 +175,8 @@ class SyncMappingSerializer(NetBoxModelSerializer):
         Keeps both message and code per error, so API consumers can
         branch on the validator's codes (incompatible,
         duplicate_target, unknown_field, pairing_missing,
-        subfield_required) the same way the UI will.
+        pairing_ambiguous, subfield_required, cycle) the same way the
+        UI will.
         """
         if hasattr(exc, 'error_dict'):
             details = {

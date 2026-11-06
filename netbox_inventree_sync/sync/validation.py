@@ -4,10 +4,13 @@ Wires the pieces produced by Tasks 3-6 into two entry points:
 :func:`validate_mapping` checks one mapping's field pairs against live
 NetBox introspection and the InvenTree endpoint's OPTIONS metadata,
 auto-setting each pair's transform; :func:`validate_mapping_graph` checks
-a connection's enabled mappings for pairing dependency cycles. All
-failures raise :class:`django.core.exceptions.ValidationError` with one of
-the codes ``incompatible``, ``duplicate_target``, ``unknown_field``,
-``pairing_missing``, ``subfield_required`` or ``cycle``.
+a connection's enabled mappings for pairing dependency cycles (the write
+paths reach it through :func:`validate_mapping_graph_for_write`, which
+substitutes the mapping being saved with its pending pair set). All
+failures raise :class:`django.core.exceptions.ValidationError` with one
+of the codes ``incompatible``, ``duplicate_target``, ``unknown_field``,
+``pairing_missing``, ``pairing_ambiguous``, ``subfield_required`` or
+``cycle``.
 """
 
 from __future__ import annotations
@@ -34,6 +37,9 @@ def validate_mapping(mapping: SyncMapping, pairs: list[SyncFieldPair]) -> list[S
     * ``duplicate_target`` — two pairs writing the same InvenTree field,
     * ``pairing_missing`` — pointer→related whose pairing mapping is
       absent or disabled on the connection,
+    * ``pairing_ambiguous`` — pointer→related whose target model is
+      paired by MORE THAN ONE enabled mapping on the connection
+      (spec: pointer resolution requires exactly one),
     * ``subfield_required`` — pointer→string without ``netbox_subfield``,
     * ``incompatible`` — a pair rejected by the compatibility matrix.
 
@@ -44,7 +50,8 @@ def validate_mapping(mapping: SyncMapping, pairs: list[SyncFieldPair]) -> list[S
     inventree_specs = {
         spec.name: spec for spec in client.get_field_specs(mapping.inventree_endpoint)
     }
-    available_pairings = _available_pairings(mapping)
+    pairings_by_ct = _enabled_pairings_by_ct(mapping)
+    available_pairings = set(pairings_by_ct)
 
     errors: list[ValidationError] = []
     seen_targets: set[str] = set()
@@ -75,16 +82,25 @@ def validate_mapping(mapping: SyncMapping, pairs: list[SyncFieldPair]) -> list[S
             ))
             continue
 
-        if (
-            netbox_spec.type == 'pointer' and inventree_spec.type == 'related'
-            and netbox_spec.pointer_model not in available_pairings
-        ):
-            errors.append(ValidationError(
-                f'Pair "{pair.netbox_field}" -> "{pair.inventree_field}" needs an enabled '
-                f'mapping of {netbox_spec.pointer_model} on this connection (its pairing).',
-                code='pairing_missing',
-            ))
-            continue
+        if netbox_spec.type == 'pointer' and inventree_spec.type == 'related':
+            # Pointer resolution requires EXACTLY ONE enabled pairing
+            # mapping for the target model on this connection.
+            candidates = pairings_by_ct.get(netbox_spec.pointer_model, [])
+            if not candidates:
+                errors.append(ValidationError(
+                    f'Pair "{pair.netbox_field}" -> "{pair.inventree_field}" needs an enabled '
+                    f'mapping of {netbox_spec.pointer_model} on this connection (its pairing).',
+                    code='pairing_missing',
+                ))
+                continue
+            if len(candidates) > 1:
+                errors.append(ValidationError(
+                    f'Pair "{pair.netbox_field}" -> "{pair.inventree_field}" is ambiguous: '
+                    f'{len(candidates)} enabled mappings ({", ".join(sorted(candidates))}) pair '
+                    f'{netbox_spec.pointer_model} on this connection; exactly one is required.',
+                    code='pairing_ambiguous',
+                ))
+                continue
         if netbox_spec.type == 'pointer' and inventree_spec.type == 'string' and not pair.netbox_subfield:
             options = ', '.join(netbox_spec.subfield_options)
             errors.append(ValidationError(
@@ -108,7 +124,7 @@ def validate_mapping(mapping: SyncMapping, pairs: list[SyncFieldPair]) -> list[S
     return list(pairs)
 
 
-def validate_mapping_graph(mappings: Iterable[SyncMapping]) -> None:
+def validate_mapping_graph(mappings: Iterable[SyncMapping], pair_overrides: dict | None = None) -> None:
     """Raise ``ValidationError`` (code ``cycle``) on pairing dependency cycles.
 
     Nodes are the enabled mappings of a connection (disabled mappings never
@@ -116,6 +132,11 @@ def validate_mapping_graph(mappings: Iterable[SyncMapping]) -> None:
     has a pointer→related pair whose pairing is P — that is, the pair's
     pointer target model is P's content type. A mapping pointing at its
     own content type is a self-edge and therefore a cycle too.
+
+    ``pair_overrides`` optionally maps a mapping pk (``None`` for an
+    unsaved mapping) to the pair list that mapping is ABOUT to receive;
+    the write paths use it so a not-yet-saved pair set participates in
+    the graph instead of the stale persisted one.
     """
     enabled = [mapping for mapping in mappings if mapping.enabled]
     by_connection: dict[int, list[SyncMapping]] = {}
@@ -123,7 +144,11 @@ def validate_mapping_graph(mappings: Iterable[SyncMapping]) -> None:
         by_connection.setdefault(mapping.connection_id, []).append(mapping)
 
     for group in by_connection.values():
-        cycle_pks = _find_cycle(_pairing_edges(group))
+        # One client for the whole walk of one connection: its OPTIONS
+        # cache then serves each endpoint once no matter how many
+        # mappings target it.
+        client = InvenTreeClient(group[0].connection.url, group[0].connection.api_token)
+        cycle_pks = _find_cycle(_pairing_edges(group, client, pair_overrides))
         if cycle_pks is not None:
             by_pk = {mapping.pk: mapping for mapping in group}
             cycle = [by_pk[pk] for pk in cycle_pks]
@@ -134,7 +159,52 @@ def validate_mapping_graph(mappings: Iterable[SyncMapping]) -> None:
             )
 
 
+def validate_mapping_graph_for_write(mapping: SyncMapping, pairs: list[SyncFieldPair] | None = None) -> None:
+    """Cycle-check the graph a mapping write would produce.
+
+    Runs :func:`validate_mapping_graph` over the connection's enabled
+    mappings with ``mapping`` standing in for its persisted self — the
+    persisted row (if any) is excluded and the provisional mapping takes
+    its place, its pair set being ``pairs`` when the write carries one
+    and the stored set otherwise. A mapping under validation that is
+    (or ends up) disabled is not a graph node and only the remaining
+    graph is checked.
+    """
+    others = SyncMapping.objects.filter(
+        connection=mapping.connection,
+        enabled=True,
+    ).exclude(pk=mapping.pk)
+    pair_overrides = {mapping.pk: pairs} if pairs is not None else None
+    validate_mapping_graph([*others, mapping], pair_overrides=pair_overrides)
+
+
 # --- internals ----------------------------------------------------------------
+
+
+def _enabled_pairings_by_ct(mapping: SyncMapping) -> dict[str, list[str]]:
+    """``'app.model'`` -> names of the connection's enabled mappings of that type.
+
+    The mapping under validation counts exactly once when it is enabled
+    (its persisted self is excluded from the query), even before being
+    saved, so pre-save validation matches the persisted case; a disabled
+    mapping never offers itself as a pairing. Callers needing only
+    membership use :func:`_available_pairings`; callers deciding whether
+    a pointer is resolvable need the counts (exactly one is required).
+    """
+    pairings: dict[str, list[str]] = {}
+    rows = SyncMapping.objects.filter(
+        connection=mapping.connection,
+        enabled=True,
+    ).exclude(pk=mapping.pk).values_list(
+        'name',
+        'netbox_content_type__app_label',
+        'netbox_content_type__model',
+    )
+    for name, app_label, model in rows:
+        pairings.setdefault(f'{app_label}.{model}', []).append(name)
+    if mapping.enabled:
+        pairings.setdefault(_content_type_key(mapping.netbox_content_type), []).append(mapping.name)
+    return pairings
 
 
 def _available_pairings(mapping: SyncMapping) -> set[str]:
@@ -144,20 +214,16 @@ def _available_pairings(mapping: SyncMapping) -> set[str]:
     being saved, so pre-save form validation matches the persisted case; a
     disabled mapping never offers itself as a pairing.
     """
-    pairings = set(
-        f'{app_label}.{model}'
-        for app_label, model in SyncMapping.objects.filter(
-            connection=mapping.connection,
-            enabled=True,
-        ).values_list('netbox_content_type__app_label', 'netbox_content_type__model')
-    )
-    if mapping.enabled:
-        pairings.add(_content_type_key(mapping.netbox_content_type))
-    return pairings
+    return set(_enabled_pairings_by_ct(mapping))
 
 
-def _pairing_edges(group: list[SyncMapping]) -> dict[int, list[int]]:
-    """Adjacency (pk -> neighbor pks) of pairing dependencies in one connection."""
+def _pairing_edges(group: list[SyncMapping], client, pair_overrides: dict | None = None) -> dict[int, list[int]]:
+    """Adjacency (pk -> neighbor pks) of pairing dependencies in one connection.
+
+    ``client`` is shared across the whole group (see
+    :func:`validate_mapping_graph`); ``pair_overrides`` replaces a
+    mapping's stored pairs with its pending ones.
+    """
     pairings_by_ct: dict[str, list[int]] = {}
     for mapping in group:
         key = _content_type_key(mapping.netbox_content_type)
@@ -166,11 +232,14 @@ def _pairing_edges(group: list[SyncMapping]) -> dict[int, list[int]]:
     edges: dict[int, list[int]] = {mapping.pk: [] for mapping in group}
     for mapping in group:
         netbox_specs = {spec.name: spec for spec in get_netbox_fields(mapping.netbox_content_type)}
-        client = InvenTreeClient(mapping.connection.url, mapping.connection.api_token)
         inventree_specs = {
             spec.name: spec for spec in client.get_field_specs(mapping.inventree_endpoint)
         }
-        for pair in mapping.field_pairs.all():
+        if pair_overrides and mapping.pk in pair_overrides:
+            pairs = pair_overrides[mapping.pk]
+        else:
+            pairs = mapping.field_pairs.all()
+        for pair in pairs:
             netbox_spec = netbox_specs.get(pair.netbox_field)
             inventree_spec = inventree_specs.get(pair.inventree_field)
             if netbox_spec is None or inventree_spec is None:

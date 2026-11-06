@@ -29,7 +29,11 @@ from .models import InvenTreeInstance, SyncFieldPair, SyncLogEntry, SyncMapping,
 from .sync.client import InvenTreeClient, InvenTreeClientError
 from .sync.compatibility import compatible
 from .sync.fields import get_netbox_fields
-from .sync.validation import _available_pairings, validate_mapping
+from .sync.validation import (
+    _available_pairings,
+    validate_mapping,
+    validate_mapping_graph_for_write,
+)
 
 __all__ = (
     'InvenTreeInstanceListView',
@@ -315,8 +319,9 @@ class SyncMappingBuilderView(ObjectPermissionRequiredMixin, View):
     returns, fetched server-side and embedded as a JSON script block —
     the page needs no further auth hops). POST takes a JSON array of
     pairs, validates it through
-    :func:`~netbox_inventree_sync.sync.validation.validate_mapping` —
-    the same gate the REST API applies; the client-side greying is UX,
+    :func:`~netbox_inventree_sync.sync.validation.validate_mapping` and
+    :func:`~netbox_inventree_sync.sync.validation.validate_mapping_graph_for_write`
+    — the same gates the REST API applies; the client-side greying is UX,
     not enforcement — and on success replaces the mapping's full pair
     set inside one transaction, mirroring the serializer semantics.
     """
@@ -373,6 +378,9 @@ class SyncMappingBuilderView(ObjectPermissionRequiredMixin, View):
         ]
         try:
             validated_pairs = validate_mapping(mapping, pairs)
+            # Same pairing-graph gate the REST serializer applies: a pair
+            # set that closes a cycle is rejected inline, nothing written.
+            validate_mapping_graph_for_write(mapping, validated_pairs)
         except DjangoValidationError as exc:
             context = self._context(
                 mapping, fields_payload, posted_pairs=pairs,

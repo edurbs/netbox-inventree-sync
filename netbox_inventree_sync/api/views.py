@@ -20,7 +20,7 @@ from django.shortcuts import get_object_or_404
 from drf_spectacular.utils import extend_schema
 from rest_framework import status
 from rest_framework.decorators import action
-from rest_framework.exceptions import APIException, ValidationError
+from rest_framework.exceptions import ValidationError
 from rest_framework.permissions import IsAuthenticated
 from rest_framework.response import Response
 from rest_framework.reverse import reverse
@@ -28,6 +28,7 @@ from rest_framework.views import APIView
 
 from netbox.api.viewsets import NetBoxModelViewSet, NetBoxReadOnlyModelViewSet
 
+from netbox_inventree_sync.api.exceptions import InvenTreeUnavailable
 from netbox_inventree_sync.filtersets import (
     InvenTreeInstanceFilterSet,
     SyncLogEntryFilterSet,
@@ -50,14 +51,6 @@ __all__ = (
     'SyncMappingViewSet',
     'SyncedObjectViewSet',
 )
-
-
-class InvenTreeUnavailable(APIException):
-    """The InvenTree server could not be queried for endpoint metadata."""
-
-    status_code = status.HTTP_502_BAD_GATEWAY
-    default_detail = 'The InvenTree server could not be reached.'
-    default_code = 'inventree_unavailable'
 
 
 class InvenTreeInstanceViewSet(NetBoxModelViewSet):

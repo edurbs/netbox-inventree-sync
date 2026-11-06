@@ -17,7 +17,7 @@ from django.urls import reverse
 from rest_framework.test import APIClient
 
 from core.models import Job
-from dcim.models import InventoryItem, InventoryItemRole, Manufacturer
+from dcim.models import Device, InventoryItem, InventoryItemRole, Manufacturer, VirtualChassis
 from users.models import User
 
 from netbox_inventree_sync.api import views as api_views
@@ -50,6 +50,10 @@ ENDPOINT_SPECS = {
         _string('description'),
         _boolean('active'),
         _related('category', 'partcategory'),
+    ],
+    '/api/company/': [
+        _string('name'),
+        _related('category', 'contactcategory'),
     ],
 }
 
@@ -259,6 +263,68 @@ class MappingWriteTestCase(PluginAPITestCase):
             {(p.netbox_field, p.transform) for p in mapping.field_pairs.all()},
             {('manufacturer', 'str'), ('part_id', 'none')},
         )
+
+
+class MappingWriteGraphTestCase(PluginAPITestCase):
+    """The pairing-cycle gate on the REST write path.
+
+    ``validate_mapping_graph`` must run on every write that can change the
+    graph: a POST whose pair set would close a mutual pairing cycle is
+    rejected with 400 (code ``cycle``) and persists nothing.
+    """
+
+    def test_mutual_pairing_cycle_rejected(self):
+        # An existing enabled mapping VirtualChassis -> /api/company/ whose
+        # master pair (pointer to dcim.device) targets the device content
+        # type...
+        chassis_mapping = SyncMapping.objects.create(
+            name='Chassis to companies',
+            connection=self.connection,
+            netbox_content_type=ContentType.objects.get_for_model(VirtualChassis),
+            inventree_endpoint='/api/company/',
+            enabled=True,
+        )
+        SyncFieldPair.objects.create(
+            mapping=chassis_mapping, netbox_field='master', inventree_field='category',
+        )
+        # ...and the POST under test: Device -> /api/part/ with
+        # virtual_chassis (pointer to dcim.virtualchassis) -> related —
+        # each mapping would be the other's pairing: a cycle.
+        payload = self.mapping_payload(
+            name='Devices to parts',
+            netbox_content_type='dcim.device',
+            enabled=True,
+            field_pairs=[
+                {'netbox_field': 'virtual_chassis', 'netbox_subfield': '',
+                 'inventree_field': 'category'},
+            ],
+        )
+
+        with mock.patch.object(validation, 'InvenTreeClient', StubInvenTreeClient):
+            response = self.client.post(self.url('syncmapping-list'), payload, format='json')
+
+        self.assertEqual(response.status_code, 400, response.content)
+        details = response.data['__all__']
+        self.assertIn('cycle', [detail.code for detail in details])
+        self.assertIn('Devices to parts', str(details))
+        self.assertIn('Chassis to companies', str(details))
+        # Nothing was persisted.
+        self.assertFalse(SyncMapping.objects.filter(name='Devices to parts').exists())
+
+
+class MappingWriteOutageTestCase(PluginAPITestCase):
+    """Mapping writes while InvenTree is down return 502, not 500."""
+
+    def test_mapping_write_returns_502_when_inventree_unreachable(self):
+        payload = self.mapping_payload()
+        with mock.patch.object(validation, 'InvenTreeClient', ExplodingInvenTreeClient):
+            response = self.client.post(self.url('syncmapping-list'), payload, format='json')
+
+        self.assertEqual(response.status_code, 502, response.content)
+        self.assertIn('connection refused', str(response.data))
+        # Nothing was persisted while the validator could not reach the
+        # endpoint metadata.
+        self.assertFalse(SyncMapping.objects.filter(name='Inventory items to parts').exists())
 
 
 class MappingUpdateTestCase(PluginAPITestCase):

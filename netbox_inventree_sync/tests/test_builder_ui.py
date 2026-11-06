@@ -15,7 +15,7 @@ from django.contrib.contenttypes.models import ContentType
 from django.test import TestCase
 from django.urls import reverse
 
-from dcim.models import InventoryItem, Manufacturer
+from dcim.models import Device, InventoryItem, Manufacturer, VirtualChassis
 from users.models import User
 
 from netbox_inventree_sync import views
@@ -44,6 +44,10 @@ ENDPOINT_SPECS = {
         _string('description'),
         _boolean('active'),
         _related('category', 'partcategory'),
+    ],
+    '/api/company/': [
+        _string('name'),
+        _related('category', 'contactcategory'),
     ],
 }
 
@@ -207,6 +211,48 @@ class BuilderSaveTestCase(BuilderTestCase):
         ])
         self.assertEqual(response.status_code, 302, response.content)
         self.assertEqual(SyncFieldPair.objects.filter(mapping=self.mapping).count(), 1)
+
+    def test_save_pairs_closing_a_cycle_400(self):
+        """A pair set that closes a mutual pairing cycle is rejected inline.
+
+        The mapping under edit is an ENABLED Device -> /api/part/ mapping;
+        the connection already carries an enabled VirtualChassis mapping
+        whose master pair points at dcim.device. Saving the device side's
+        virtual_chassis pair would make each mapping the other's pairing.
+        """
+        chassis_mapping = SyncMapping.objects.create(
+            name='Chassis to companies',
+            connection=self.connection,
+            netbox_content_type=ContentType.objects.get_for_model(VirtualChassis),
+            inventree_endpoint='/api/company/',
+            enabled=True,
+        )
+        SyncFieldPair.objects.create(
+            mapping=chassis_mapping, netbox_field='master', inventree_field='category',
+        )
+        device_mapping = SyncMapping.objects.create(
+            name='Devices to parts',
+            connection=self.connection,
+            netbox_content_type=ContentType.objects.get_for_model(Device),
+            inventree_endpoint='/api/part/',
+            enabled=True,
+        )
+        builder_url = reverse(
+            'plugins:netbox_inventree_sync:syncmapping_builder', kwargs={'pk': device_mapping.pk},
+        )
+
+        payload = {'pairs': json.dumps([
+            {'netbox_field': 'virtual_chassis', 'netbox_subfield': '', 'inventree_field': 'category'},
+        ])}
+        with mock.patch.object(views, 'InvenTreeClient', StubInvenTreeClient), \
+                mock.patch.object(validation, 'InvenTreeClient', StubInvenTreeClient):
+            response = self.client.post(builder_url, payload)
+
+        self.assertEqual(response.status_code, 400, response.content)
+        # The inline error names the cycle; zero rows were written.
+        self.assertContains(response, 'cycle', status_code=400)
+        self.assertContains(response, 'Chassis to companies', status_code=400)
+        self.assertEqual(SyncFieldPair.objects.filter(mapping=device_mapping).count(), 0)
 
 
 class BuilderDetailLinkTestCase(BuilderTestCase):
