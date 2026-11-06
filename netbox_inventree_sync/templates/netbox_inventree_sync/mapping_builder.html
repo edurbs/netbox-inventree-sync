@@ -1,0 +1,174 @@
+{% extends 'generic/_base.html' %}
+{% load static %}
+{% load helpers %}
+{% load i18n %}
+
+{% comment %}
+  Field-pair builder: NetBox fields left, InvenTree fields right, linked
+  rows for the mapping's current pairs. The server renders everything
+  (pairs, selects, the compatibility greying of the InvenTree options)
+  and embeds the fields matrix as JSON; mapping-builder.js progressively
+  enhances add/remove, the dynamic greying per chosen NetBox field and
+  the pointer sub-attribute select. The server re-validates on POST —
+  the greying is UX, not enforcement.
+{% endcomment %}
+
+{% block title %}{{ object }} · {% trans "Field pair builder" %}{% endblock %}
+
+{% block subtitle %}
+  <div class="text-secondary fs-5">
+    <ul class="list-inline">
+      <li class="list-inline-item">{{ object.netbox_content_type.app_label }}.{{ object.netbox_content_type.model }}</li>
+      <li class="list-inline-item">&rarr;</li>
+      <li class="list-inline-item"><code>{{ object.inventree_endpoint }}</code> ({{ object.connection }})</li>
+    </ul>
+  </div>
+{% endblock subtitle %}
+
+{% block content %}
+  {% if errors %}
+    <div class="alert alert-danger" role="alert">
+      <strong>{% trans "The pairs could not be saved" %}:</strong>
+      <ul class="mb-0">
+        {% for error in errors %}<li>{{ error }}</li>{% endfor %}
+      </ul>
+    </div>
+  {% endif %}
+
+  {% if not fields_data %}
+    <div class="alert alert-warning" role="alert">
+      {% trans "InvenTree field metadata is unavailable, so no new pairs can be added right now. The current pairs are listed below." %}
+    </div>
+  {% endif %}
+
+  <form method="post" id="mapping-builder-form">
+    {% csrf_token %}
+    <input type="hidden" name="pairs" id="pairs-json" value="{{ pairs_json }}">
+
+    {# Two-column pair table: NetBox (left) ↔ InvenTree (right) #}
+    <div class="card mb-3">
+      <h5 class="card-header">{% trans "Field pairs" %}</h5>
+      <div class="card-table table-responsive">
+        <table class="table table-hover">
+          <thead>
+            <tr>
+              <th>{% trans "NetBox field" %}</th>
+              <th>{% trans "Sub-attribute" %}</th>
+              <th></th>
+              <th>{% trans "InvenTree field" %}</th>
+              <th>{% trans "Transform" %}</th>
+              <th></th>
+            </tr>
+          </thead>
+          <tbody id="pairs-body">
+            {% for row in pair_rows %}
+              <tr class="pair-row"
+                  data-netbox-field="{{ row.netbox_field }}"
+                  data-netbox-subfield="{{ row.netbox_subfield }}"
+                  data-inventree-field="{{ row.inventree_field }}">
+                <td>
+                  {{ row.netbox_label }} <code>{{ row.netbox_field }}</code>
+                  <span class="badge {{ row.netbox_badge }}">{{ row.netbox_type }}</span>
+                </td>
+                <td>{{ row.netbox_subfield|placeholder }}</td>
+                <td class="text-center text-muted">&harr;</td>
+                <td>
+                  <code>{{ row.inventree_field }}</code>
+                  <span class="badge {{ row.inventree_badge }}">{{ row.inventree_type }}</span>
+                </td>
+                <td><span class="badge text-bg-light">{{ row.transform }}</span></td>
+                <td class="text-end">
+                  <button type="button" class="btn btn-sm btn-outline-danger remove-pair">
+                    <i class="mdi mdi-delete" aria-hidden="true"></i> {% trans "Remove" %}
+                  </button>
+                </td>
+              </tr>
+            {% empty %}
+              <tr class="pair-row-none">
+                <td colspan="6" class="text-muted">
+                  {% trans "No field pairs yet — link the first pair below." %}
+                </td>
+              </tr>
+            {% endfor %}
+          </tbody>
+        </table>
+      </div>
+    </div>
+
+    {% if fields_data %}
+      {# Add-pair row: NetBox select (left) → InvenTree select (right) #}
+      <div class="card mb-3">
+        <h5 class="card-header">{% trans "Link a new pair" %}</h5>
+        <div class="card-body">
+          <div class="row">
+            <div class="col-12 col-lg-4">
+              <label class="form-label" for="netbox-field-select">{% trans "NetBox field" %}</label>
+              <select id="netbox-field-select" class="form-select" aria-label="{% trans 'NetBox field' %}">
+                {% for option in netbox_options %}
+                  <option value="{{ option.value }}"
+                          data-type="{{ option.type }}"
+                          data-subfields="{{ option.subfields }}"
+                          data-badge="{{ option.badge }}"
+                          {% if option.value == selected_netbox %}selected{% endif %}>
+                    {{ option.label }} ({{ option.value }})
+                  </option>
+                {% endfor %}
+              </select>
+              <div id="subfield-select-container" class="mt-2 {% if not selected_netbox_subfields %}d-none{% endif %}">
+                <label class="form-label" for="netbox-subfield-select">
+                  {% trans "Pointer attribute" %} <span class="text-danger">*</span>
+                </label>
+                <select id="netbox-subfield-select" class="form-select" aria-label="{% trans 'Pointer attribute' %}">
+                  {% for subfield in selected_netbox_subfields %}
+                    <option value="{{ subfield }}">{{ subfield }}</option>
+                  {% endfor %}
+                </select>
+                <div class="form-text">
+                  {% trans "Required: this pointer is projected onto a text field as one of its attributes." %}
+                </div>
+              </div>
+            </div>
+            <div class="col-12 col-lg-1 d-flex align-items-center justify-content-center">
+              <span class="fs-2 text-muted" title="{% trans 'Linked pair' %}">&harr;</span>
+            </div>
+            <div class="col-12 col-lg-4">
+              <label class="form-label" for="inventree-field-select">{% trans "InvenTree field" %}</label>
+              <select id="inventree-field-select" class="form-select" aria-label="{% trans 'InvenTree field' %}">
+                {% for option in inventree_options %}
+                  <option value="{{ option.value }}"
+                          data-type="{{ option.type }}"
+                          data-badge="{{ option.badge }}"
+                          data-compatible="{{ option.compatible }}"
+                          {% if option.disabled %}disabled title="{{ option.title }}"{% endif %}>
+                    {{ option.label }} ({{ option.type }})
+                  </option>
+                {% endfor %}
+              </select>
+              <div class="form-text">
+                {% trans "Greyed-out fields do not accept the selected NetBox field's type." %}
+              </div>
+            </div>
+            <div class="col-12 col-lg-3 d-flex align-items-end">
+              <button type="button" class="btn btn-success w-100" id="add-pair">
+                <i class="mdi mdi-link-variant" aria-hidden="true"></i> {% trans "Link pair" %}
+              </button>
+            </div>
+          </div>
+        </div>
+      </div>
+    {% endif %}
+
+    <div class="text-end mb-3">
+      <a href="{{ return_url }}" class="btn btn-outline-secondary">{% trans "Cancel" %}</a>
+      <button type="submit" class="btn btn-primary">
+        <i class="mdi mdi-content-save" aria-hidden="true"></i> {% trans "Save pairs" %}
+      </button>
+    </div>
+  </form>
+
+  {% if fields_data %}
+    {# The fields matrix for the client-side enhancement (no secrets — metadata only) #}
+    {{ fields_data|json_script:'builder-fields' }}
+    <script src="{% static 'netbox_inventree_sync/js/mapping-builder.js' %}" defer></script>
+  {% endif %}
+{% endblock content %}

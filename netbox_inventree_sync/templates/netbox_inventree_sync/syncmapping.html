@@ -1,4 +1,5 @@
 {% extends 'generic/object.html' %}
+{% load i18n %}
 {% load render_table from django_tables2 %}
 
 {% block content %}
@@ -46,7 +47,13 @@
   <div class="row mb-3">
     <div class="col col-md-12">
       <div class="card">
-        <h5 class="card-header">Field pairs</h5>
+        <h5 class="card-header d-flex justify-content-between align-items-center">
+          <span>{% trans "Field pairs" %}</span>
+          <a href="{% url 'plugins:netbox_inventree_sync:syncmapping_builder' pk=object.pk %}"
+             class="btn btn-sm btn-primary">
+            <i class="mdi mdi-link-variant" aria-hidden="true"></i> {% trans "Field pair builder" %}
+          </a>
+        </h5>
         {% render_table field_pairs_table %}
       </div>
     </div>
