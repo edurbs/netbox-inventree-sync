@@ -63,6 +63,9 @@ the catalog case (NetBox Inventory Item → InvenTree Part).
   Reference: https://github.com/netbox-community/netbox-plugin-tutorial
 - InvenTree is driven only through its public REST API (token auth), never
   its database. API v1 (`/api/...`), self-describing via `OPTIONS` metadata.
+- InvenTree version: the test stack pins the latest stable release tag in
+  docker compose. No pre-existing production instance is in scope
+  (confirmed with user); compatibility targets that pinned version.
 - Background work uses NetBox's job system (JobRunner / django-rq), not ad-hoc
   threads.
 - Only officially documented NetBox plugin APIs are used.
@@ -129,7 +132,12 @@ plugin name `netbox_inventree_sync`. Top-level nav menu "InvenTree Sync".
   (FK to Django ContentType), `inventree_endpoint` (e.g. `/api/part/`),
   `match_netbox_field` + `match_inventree_field` (identity pair for adopting
   existing InvenTree objects on first sync; "always create" if blank),
-  `enabled`, `description`. Unique per (connection, netbox_content_type).
+  `enabled`, `description`. Unique per (connection, netbox_content_type,
+  inventree_endpoint) — one NetBox type may feed several InvenTree endpoints
+  (e.g. Inventory Item → Part *and* StockItem later, if instance-level sync
+  is wanted). Signal handlers fan out to every enabled mapping for the type.
+  Pointer resolution requires exactly one enabled pairing mapping for the
+  target model on that connection; ambiguity is a mapping validation error.
 - **SyncFieldPair** — FK to mapping, `netbox_field`, `netbox_subfield`
   (attribute path for pointer-as-text, e.g. `name` for
   `manufacturer.name`), `inventree_field`, `transform` (none | iso_date |
@@ -209,10 +217,28 @@ NetBox object saved/deleted
   by the next push or by reconcile.
 - **Errors**: failed pushes set `status=failed` with `last_error`; the
   reconcile job retries failed and pending objects. No inline retries.
+- **Adoption policy (never guess identity)**: match-key lookups use exact,
+  case-sensitive comparison. If the lookup returns **multiple** candidates,
+  the object is *not* adopted — it is flagged with an "ambiguous match"
+  error for manual resolution. If the NetBox object's match-key field is
+  blank/null, adoption is skipped and the object is flagged (no create, no
+  guess). Reconcile leaves such objects pending with their error visible.
+- **Concurrency (no duplicate creates)**: the SyncedObject unique
+  constraint on (mapping, netbox_object_id) plus `get_or_create` of a
+  `pending` link at job start makes the claim race-safe; the job then holds
+  a row lock (SELECT FOR UPDATE) on that link for the duration of the push,
+  so a second job for the same object waits and subsequently takes the
+  update path (or no-ops when the payload already matches).
 - **Reconcile (system job)**: enqueued at a configurable interval (default
-  hourly; NetBox system jobs run while the RQ worker runs). Walks all
-  enabled mappings, recomputes payload hashes, pushes drift, adopts
-  matches, retries failures, reports orphans.
+  hourly; NetBox system jobs run while the RQ worker runs). Reconcile is
+  *authoritative*: for every linked object it GETs the InvenTree object,
+  compares the currently-mapped InvenTree fields against the expected
+  payload, and PATCHes on any difference — this is what detects and
+  repairs remote-side drift (manual InvenTree edits), since payload hashes
+  alone only see NetBox-side changes. It also pushes pending/failed
+  objects, walks mapped NetBox objects without links (match/adopt/create),
+  and flags orphans. The hash fast-path (`last_payload_hash`) is used only
+  by the event-driven push path, not by reconcile.
 - **Manual**: "Sync now" button on each mapping (enqueues an immediate
   full pass for that mapping).
 
