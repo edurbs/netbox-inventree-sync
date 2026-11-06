@@ -47,6 +47,9 @@ API_TOKEN_PEPPERS = {
 }
 
 DEBUG = True
+# Plan-mandated dev setting: permits dev-only behaviors (e.g. generating new
+# schema migrations) and disables the debug warning banner in the UI.
+DEVELOPER = True
 
 # The plugin is enabled by scripts/setup_netbox.sh right after it installs the
 # package into netbox/venv: NetBox refuses to start if a listed plugin is not

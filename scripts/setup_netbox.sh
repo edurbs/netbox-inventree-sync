@@ -65,6 +65,12 @@ if [[ -f "$CONFIG_PY" ]]; then
 else
     cp config/configuration.py.tmpl "$CONFIG_PY"
 fi
+# Propagate template settings to configurations provisioned before they were
+# added (idempotent): DEVELOPER = True is part of the plan-mandated dev config.
+if ! grep -q '^DEVELOPER = True' "$CONFIG_PY"; then
+    printf "\n# Added by scripts/setup_netbox.sh (missing from older templates)\nDEVELOPER = True\n" \
+        >> "$CONFIG_PY"
+fi
 
 # --- 5. Backing services (Postgres + Redis) -----------------------------------
 docker compose up -d
