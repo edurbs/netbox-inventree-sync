@@ -1,0 +1,16 @@
+[build-system]
+requires = ["setuptools"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "netbox-inventree-sync"
+version = "0.1.0"
+description = "Synchronize NetBox inventory data to InvenTree"
+readme = "README.md"
+requires-python = ">=3.12"
+dependencies = [
+    "requests",
+]
+
+[tool.setuptools.packages.find]
+include = ["netbox_inventree_sync*"]

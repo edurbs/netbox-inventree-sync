@@ -1,0 +1,56 @@
+####################################################################
+# NetBox v4.7 development configuration for netbox-inventree-sync.
+#
+# scripts/setup_netbox.sh copies this file to netbox/netbox/configuration.py.
+# Backing services come from docker-compose.yml:
+#   - PostgreSQL: 127.0.0.1:15432 (netbox/netbox/netbox)
+#   - Redis:      127.0.0.1:16379 (no auth)
+####################################################################
+
+ALLOWED_HOSTS = ['*']
+
+DATABASES = {
+    'default': {
+        'ENGINE': 'django.db.backends.postgresql',
+        'NAME': 'netbox',               # Database name
+        'USER': 'netbox',               # PostgreSQL username
+        'PASSWORD': 'netbox',           # PostgreSQL password
+        'HOST': 'localhost',            # Database server (docker: netbox-db)
+        'PORT': '15432',                # Published on 127.0.0.1 by docker-compose
+        'CONN_MAX_AGE': 300,            # Max database connection age
+    }
+}
+
+REDIS = {
+    'tasks': {
+        'HOST': 'localhost',
+        'PORT': 16379,
+        'DATABASE': 0,
+        'SSL': False,
+    },
+    'caching': {
+        'HOST': 'localhost',
+        'PORT': 16379,
+        'DATABASE': 1,
+        'SSL': False,
+    },
+}
+
+# Development-only key (>= 50 chars required). Regenerate for any real install.
+SECRET_KEY = 'iJGcg5lmz+8NFB/tpagJAP/Q4pYcqwlTPycLS6VhJOFxgsHT5N3qaWHaq/lCTcru'
+
+# NetBox 4.7 requires at least one pepper to create API tokens (>= 50 chars).
+# Development-only value; regenerate for any real install.
+API_TOKEN_PEPPERS = {
+    1: 'q5+zcOtt9cr3PzQg7iaZl/yKX1L+wZr8uQPJ+uvmlu7uzMvzgH27PABRi4E6nhvI',
+}
+
+DEBUG = True
+
+# The plugin is enabled by scripts/setup_netbox.sh right after it installs the
+# package into netbox/venv: NetBox refuses to start if a listed plugin is not
+# importable, so these lines must stay disabled until then.
+# PLUGINS = ['netbox_inventree_sync']
+# PLUGINS_CONFIG = {
+#     'netbox_inventree_sync': {},
+# }

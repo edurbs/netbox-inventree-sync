@@ -1,0 +1,29 @@
+# Development backing services for the NetBox plugin only
+# (a dockerized InvenTree stack is added by a later task).
+# Values are read from .env; ports are bound to loopback only.
+name: netbox-inventree-sync
+
+services:
+  netbox-db:
+    image: postgres:17-alpine
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-netbox}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-netbox}
+      POSTGRES_DB: ${POSTGRES_DB:-netbox}
+    ports:
+      - "127.0.0.1:15432:5432"
+    volumes:
+      - netbox-db-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-netbox}"]
+      interval: 5s
+      timeout: 5s
+      retries: 12
+
+  netbox-redis:
+    image: redis:7-alpine
+    ports:
+      - "127.0.0.1:16379:6379"
+
+volumes:
+  netbox-db-data:

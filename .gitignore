@@ -1,1 +1,8 @@
 .worktrees/
+
+# netbox clone + virtualenv created by scripts/setup_netbox.sh
+netbox/
+.venv/
+*.pyc
+data/
+.env
