@@ -56,8 +56,9 @@ class PairingResolutionError(Exception):
     """A pointer→related pair cannot be resolved through a pairing mapping.
 
     Raised when no enabled pairing mapping exists for the pointer target's
-    content type, the pointer is unset or unresolvable, the pairing sync
-    produced no remote pk, or resolution recursed past
+    content type, MORE THAN ONE does (the engine never guesses which one
+    to resolve through), the pointer is unset or unresolvable, the pairing
+    sync produced no remote pk, or resolution recursed past
     :data:`MAX_POINTER_DEPTH`. The containing ``sync_object`` call contains
     it on the link row like any other failure — no payload is sent for the
     referencer.
@@ -109,10 +110,13 @@ class SyncEngine:
 
         Raises :class:`PairingResolutionError` on any of: recursion past
         :data:`MAX_POINTER_DEPTH`, no pointer target on the field spec, no
-        enabled pairing mapping for the target type, an unset pointer, or
-        a pairing sync that produced no remote pk. The containing
-        ``sync_object`` call contains the error on the referencer's link
-        row; nothing is pushed for it.
+        enabled pairing mapping for the target type, MORE THAN ONE such
+        mapping (ambiguity — mapping validation rejects this up front;
+        this is the runtime backstop for anything that slips past, e.g. a
+        second mapping enabled after the pair was last validated), an
+        unset pointer, or a pairing sync that produced no remote pk. The
+        containing ``sync_object`` call contains the error on the
+        referencer's link row; nothing is pushed for it.
         """
         if self._pointer_depth >= MAX_POINTER_DEPTH:
             raise PairingResolutionError(
@@ -133,17 +137,25 @@ class SyncEngine:
                 f'malformed pointer target {pointer_model!r} on '
                 f'{pair.netbox_field!r}; cannot resolve a pairing mapping.',
             )
-        pairing = SyncMapping.objects.filter(
+        pairings = list(SyncMapping.objects.filter(
             connection=self.connection,
             enabled=True,
             netbox_content_type__app_label=app_label,
             netbox_content_type__model=model_name,
-        ).first()
-        if pairing is None:
+        ))
+        if not pairings:
             raise PairingResolutionError(
                 f'no enabled pairing mapping for {pointer_model} on '
                 f'{self.connection}; cannot resolve {pair.netbox_field!r}.',
             )
+        if len(pairings) > 1:
+            names = ', '.join(sorted(mapping.name for mapping in pairings))
+            raise PairingResolutionError(
+                f'ambiguous pairing for {pointer_model} on {self.connection}: '
+                f'{len(pairings)} enabled mappings ({names}); refusing to guess '
+                f'which one {pair.netbox_field!r} should resolve through.',
+            )
+        pairing = pairings[0]
         target = getattr(nb_obj, pair.netbox_field, None)
         if target is None:
             raise PairingResolutionError(
@@ -172,9 +184,11 @@ class SyncEngine:
         specs carry a boolean ``active`` it is PATCHed to ``false``,
         otherwise the transition is local-only with the reason noted on
         the ``deactivate`` log entry. ``inventree_pk`` is kept so the
-        remote object stays locatable. Client/transport failures are
-        contained like everywhere else: the link still goes ``orphaned``
-        and the failure lands in an ``error`` log entry.
+        remote object stays locatable. A client/transport failure during
+        the deactivate marks the row ``failed`` instead (pk still kept):
+        reconcile's delete pass treats ``orphaned`` as settled and never
+        re-PATCHes it, so ``failed`` is what makes the next run retry the
+        remote deactivation.
         """
         with transaction.atomic():
             synced = self._claim(mapping, netbox_object_id)
@@ -183,11 +197,7 @@ class SyncEngine:
             try:
                 self._deactivate_remote(mapping, synced)
             except (InvenTreeClientError, requests.RequestException) as exc:
-                self._log(
-                    synced, SyncActionChoices.ERROR, {'active': False},
-                    response_status=getattr(exc, 'status', None),
-                    response_body=f'{type(exc).__name__}: {exc}',
-                )
+                self._record_failure(synced, exc, payload={'active': False})
         synced.refresh_from_db()
         return synced
 
@@ -258,11 +268,13 @@ class SyncEngine:
         Three passes, in order. (1) Authoritative verification: every
         ``synced`` link is GET-checked against a freshly built payload and
         drift is repaired — missing remotes are re-created. (2) Sync:
-        pending/failed links are retried, orphaned links whose NetBox
-        object returned are revived, and every NetBox object of the mapped
-        content type without a link is published through the mapping's
-        match/adopt policy. (3) Delete semantics: links whose NetBox
-        object is gone are orphaned and remotely deactivated. Rows already
+        pending/failed links whose NetBox object still exists are
+        retried, orphaned links whose NetBox object returned are revived,
+        and every NetBox object of the mapped content type without a link
+        is published through the mapping's match/adopt policy. (3) Delete
+        semantics: links whose NetBox object is gone are orphaned and
+        remotely deactivated — including ``failed`` ones, which is what
+        retries a deactivation that previously failed. Rows already
         ``orphaned`` keep their status unless their NetBox object returns.
         """
         stats = dict.fromkeys(OUTCOMES, 0)
@@ -286,13 +298,19 @@ class SyncEngine:
             else:
                 stats['updated' if result.get('drifted') else 'unchanged'] += 1
 
-        # Pass 2 — (re)sync: retry pending/failed links, revive orphaned
-        # links whose NetBox object returned, publish unlinked objects.
+        # Pass 2 — (re)sync: retry pending/failed links whose NetBox
+        # object still exists, revive orphaned links whose NetBox object
+        # returned, publish unlinked objects. Links whose object is gone
+        # belong to the delete pass below — pushing them is futile, and a
+        # failed deactivation must stay retriable instead of being
+        # re-marked failed by a "no longer exists" push here.
         sync_ids = {
             netbox_object_id for netbox_object_id, status in snapshot.items()
-            if status in (SyncStatusChoices.PENDING, SyncStatusChoices.FAILED)
-            or (status == SyncStatusChoices.ORPHANED
-                and self._netbox_object_exists(model, netbox_object_id))
+            if status in (
+                SyncStatusChoices.PENDING,
+                SyncStatusChoices.FAILED,
+                SyncStatusChoices.ORPHANED,
+            ) and self._netbox_object_exists(model, netbox_object_id)
         }
         if model is not None:
             sync_ids.update(
@@ -302,7 +320,8 @@ class SyncEngine:
             stats[self._sync(mapping, netbox_object_id)[1]] += 1
 
         # Pass 3 — delete semantics for links whose NetBox object is gone;
-        # already-orphaned rows keep their status and remote state.
+        # already-orphaned rows keep their status and remote state, while
+        # failed ones (e.g. a deactivation that errored) are retried.
         for netbox_object_id, status in snapshot.items():
             if status == SyncStatusChoices.ORPHANED:
                 continue

@@ -197,6 +197,31 @@ class PointerResolutionTestCase(TestCase):
         self.assertEqual(self.fake.posts, [])
         self.assertEqual(self.fake.patches, [])
 
+    def test_ambiguous_pairing_fails_object_without_post(self):
+        """Runtime backstop for pairing ambiguity: two enabled mappings of
+        the pointer's target model (allowed by the unique constraint —
+        same content type, different endpoints) refuse to resolve instead
+        of guessing through whichever sorts first."""
+        part, _company = self.make_mappings()
+        SyncMapping.objects.create(
+            name='Manufacturers to contacts',
+            connection=self.connection,
+            netbox_content_type=ContentType.objects.get_for_model(Manufacturer),
+            inventree_endpoint='/api/contact/',
+            enabled=True,
+        )
+
+        synced = SyncEngine(self.connection, client=self.fake).sync_object(part, self.item.pk)
+
+        self.assertEqual(synced.status, SyncStatusChoices.FAILED)
+        self.assertIn('ambiguous', synced.last_error.lower())
+        self.assertIn('Manufacturers to companies', synced.last_error)
+        self.assertIn('Manufacturers to contacts', synced.last_error)
+        # Refusing to guess means nothing was published anywhere.
+        self.assertIsNone(synced.inventree_pk)
+        self.assertEqual(self.fake.posts, [])
+        self.assertEqual(self.fake.patches, [])
+
     def test_pointer_depth_guard_raises(self):
         part, _company = self.make_mappings()
         engine = SyncEngine(self.connection, client=self.fake)
@@ -312,6 +337,43 @@ class DeleteSemanticsTestCase(TestCase):
         self.assertEqual(log.action, SyncActionChoices.DEACTIVATE)
         self.assertIn('active', log.response_body)
 
+    def test_failed_deactivate_is_retried_by_reconcile(self):
+        """A deactivate PATCH that fails marks the row ``failed`` (pk kept)
+        — NOT orphaned — so the next reconcile's delete pass retries it;
+        an orphaned row would be treated as settled forever."""
+        mfr, synced = self.make_link()
+        self.fake.field_specs[COMPANY_ENDPOINT] = COMPANY_SPECS
+        netbox_object_id = mfr.pk  # pk reads as None once deleted
+        mfr.delete()
+
+        # First attempt: InvenTree 500s on the deactivate PATCH.
+        self.fake.patch_error = InvenTreeClientError(
+            'InvenTree API PATCH /api/company/5/ returned HTTP 500',
+            status=500,
+        )
+        result = SyncEngine(self.connection, client=self.fake).handle_delete(
+            self.mapping, netbox_object_id,
+        )
+
+        self.assertEqual(result.status, SyncStatusChoices.FAILED)
+        # The remote pk is kept so the retry can still find the object.
+        self.assertEqual(result.inventree_pk, 5)
+        self.assertIn('HTTP 500', result.last_error)
+        self.assertEqual(result.log_entries.get().action, SyncActionChoices.ERROR)
+
+        # Next reconcile: the NetBox object is gone and the row is NOT
+        # orphaned, so the delete pass retries the deactivation.
+        self.fake.patch_error = None  # the retry succeeds
+        stats = SyncEngine(self.connection, client=self.fake).reconcile_mapping(self.mapping)
+
+        synced.refresh_from_db()
+        self.assertEqual(synced.status, SyncStatusChoices.ORPHANED)
+        self.assertEqual(self.fake.patches, [
+            (COMPANY_ENDPOINT, 5, {'active': False}),  # failed attempt (recorded)
+            (COMPANY_ENDPOINT, 5, {'active': False}),  # reconcile retry
+        ])
+        self.assertEqual(stats['orphaned'], 1)
+
 
 class ReconcileDriftTestCase(TestCase):
     """``reconcile_mapping`` verifies synced links against the remote truth."""
@@ -371,6 +433,39 @@ class ReconcileDriftTestCase(TestCase):
         stats = engine.reconcile_mapping(self.mapping)
         self.assertEqual(stats['unchanged'], 1)
         self.assertEqual(len(self.fake.patches), 1)
+
+    def test_reconcile_recreates_vanished_remote(self):
+        """A synced link whose remote GET 404s is re-created with a new pk
+        (the Task 9 review's deferred case): drift is counted, the 404 and
+        the replacement create are both in the audit log."""
+        synced = SyncedObject.objects.create(
+            mapping=self.mapping,
+            netbox_object_id=self.mfr.pk,
+            inventree_pk=50,  # not in fake.remote -> GET 404
+            status=SyncStatusChoices.SYNCED,
+            last_payload_hash='stale',
+        )
+
+        stats = SyncEngine(self.connection, client=self.fake).reconcile_mapping(self.mapping)
+
+        synced.refresh_from_db()
+        # A replacement was published and linked.
+        self.assertEqual(synced.status, SyncStatusChoices.SYNCED)
+        self.assertEqual(synced.inventree_pk, 101)  # FakeClient's first assigned pk
+        self.assertEqual(self.fake.posts, [
+            (COMPANY_ENDPOINT, {'name': 'Acme', 'description': ''}),
+        ])
+        self.assertEqual(stats['updated'], 1)
+        # Audit trail: the 404 error entry and the create entry.
+        self.assertEqual(
+            {entry.action for entry in synced.log_entries.all()},
+            {SyncActionChoices.ERROR, SyncActionChoices.CREATE},
+        )
+        error_entry = synced.log_entries.get(action=SyncActionChoices.ERROR)
+        self.assertEqual(error_entry.response_status, 404)
+        self.assertIn('re-creating', error_entry.response_body)
+        create_entry = synced.log_entries.get(action=SyncActionChoices.CREATE)
+        self.assertEqual(create_entry.payload, {'name': 'Acme', 'description': ''})
 
 
 class VerifyRemoteContainmentTestCase(TestCase):
