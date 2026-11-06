@@ -1,0 +1,46 @@
+{% load humanize i18n %}
+{% comment %}
+  The InvenTree panel injected into the left column of mapped objects'
+  detail pages (template_content.InvenTreeSyncPanel, via NetBox's
+  PluginContentPanel('left_page')).
+
+  Context:
+    - object: the NetBox object whose page is rendering
+    - sync_rows: one entry per tracked link (mapping), each with
+      `synced` (the SyncedObject), `label`, `url` (the InvenTree
+      counterpart, '' when none exists yet) and `badge_color`. Empty
+      when nothing is synced yet but an enabled mapping covers the
+      model — then the muted "not synced" note shows.
+{% endcomment %}
+<div class="card">
+  <h5 class="card-header">{% trans "InvenTree" %}</h5>
+  <table class="table table-hover attr-table">
+    {% for row in sync_rows %}
+      <tr>
+        <th scope="row">
+          {% if row.url %}
+            <a href="{{ row.url }}" target="_blank" rel="noopener noreferrer">{{ row.label }}</a>
+          {% else %}
+            {{ row.label }}
+          {% endif %}
+        </th>
+        <td>
+          <span class="badge text-bg-{{ row.badge_color }}">{{ row.synced.get_status_display }}</span>
+          {% if row.synced.last_synced_at %}
+            <span class="text-muted">&middot; {% trans "synced" %} {{ row.synced.last_synced_at|naturaltime }}</span>
+          {% endif %}
+          {% if row.synced.last_error %}
+            <div class="text-danger small">{{ row.synced.last_error|truncatechars:120 }}</div>
+          {% endif %}
+        </td>
+      </tr>
+    {% empty %}
+      <tr>
+        <td class="text-muted">{% trans "Not synced yet — no InvenTree counterpart is tracked for this object." %}</td>
+      </tr>
+    {% endfor %}
+  </table>
+  <div class="card-footer">
+    <a href="{% url 'plugins:netbox_inventree_sync:syncedobject_list' %}">{% trans "View synced objects" %}</a>
+  </div>
+</div>

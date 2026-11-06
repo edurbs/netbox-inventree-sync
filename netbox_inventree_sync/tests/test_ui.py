@@ -4,21 +4,30 @@ These exercise the tutorial-style generic views (list/add/edit) through
 Django's test client with a logged-in superuser. The InvenTree side of
 the "Test connection" button is stubbed at ``views.InvenTreeClient`` —
 the same module-attribute patching pattern the API tests use — so no
-HTTP ever leaves the process.
+HTTP ever leaves the process. The Task 14 screens (synced-objects /
+sync-log lists, the mapping "Sync now" action and the object-detail
+panel) are covered here too; none of them talk to InvenTree either.
 """
 
 from unittest import mock
 
+from django.contrib.auth.models import Permission
 from django.contrib.contenttypes.models import ContentType
 from django.test import TestCase
 from django.urls import reverse
+from django.utils import timezone
 
-from dcim.models import InventoryItem, Manufacturer
+from core.models import Job
+from dcim.models import Device, DeviceRole, DeviceType, InventoryItem, Manufacturer, Site
 from users.models import User
 
 from netbox_inventree_sync import views
+from netbox_inventree_sync.choices import SyncActionChoices, SyncStatusChoices
 from netbox_inventree_sync.forms import SyncMappingForm
-from netbox_inventree_sync.models import InvenTreeInstance, SyncFieldPair, SyncMapping
+from netbox_inventree_sync.jobs import ReconcileJob
+from netbox_inventree_sync.models import (
+    InvenTreeInstance, SyncFieldPair, SyncLogEntry, SyncMapping, SyncedObject,
+)
 from netbox_inventree_sync.sync.client import InvenTreeClientError
 
 
@@ -167,3 +176,199 @@ class NavMenuUITestCase(PluginUITestCase):
         self.assertContains(response, 'InvenTree Sync')
         self.assertContains(response, 'Connections')
         self.assertContains(response, 'Mappings')
+
+
+class SyncedObjectListUITestCase(PluginUITestCase):
+    """The read-only synced-objects list and its status/mapping filters."""
+
+    @classmethod
+    def setUpTestData(cls):
+        super().setUpTestData()
+        manufacturer_ct = ContentType.objects.get_for_model(Manufacturer)
+        # Two mappings (different endpoints: the pair is unique per
+        # endpoint), disabled so no recurring reconcile schedule appears.
+        cls.mapping_a = SyncMapping.objects.create(
+            name='Manufacturers A', connection=cls.connection,
+            netbox_content_type=manufacturer_ct, inventree_endpoint='/api/company/',
+            enabled=False,
+        )
+        cls.mapping_b = SyncMapping.objects.create(
+            name='Manufacturers B', connection=cls.connection,
+            netbox_content_type=manufacturer_ct, inventree_endpoint='/api/supplier/',
+            enabled=False,
+        )
+        cls.synced_ok = SyncedObject.objects.create(
+            mapping=cls.mapping_a, netbox_object_id=11, inventree_pk=101,
+            status=SyncStatusChoices.SYNCED, last_synced_at=timezone.now(),
+        )
+        cls.synced_failed = SyncedObject.objects.create(
+            mapping=cls.mapping_b, netbox_object_id=22,
+            status=SyncStatusChoices.FAILED, last_error='InvenTree API request failed: connection refused',
+        )
+
+    def test_synced_objects_list_with_filters(self):
+        list_url = reverse('plugins:netbox_inventree_sync:syncedobject_list')
+
+        # Unfiltered: both link rows show, the synced one with its
+        # InvenTree counterpart link (<url> + endpoint path + pk) and the
+        # failed one with its error text.
+        response = self.client.get(list_url)
+        self.assertEqual(response.status_code, 200)
+        self.assertContains(response, 'dcim.manufacturer #11')
+        self.assertContains(response, 'dcim.manufacturer #22')
+        self.assertContains(response, 'http://inventree.test/company/101/')
+        self.assertContains(response, 'connection refused')
+
+        # status=failed keeps only the failed row.
+        response = self.client.get(list_url, {'status': SyncStatusChoices.FAILED})
+        self.assertEqual(response.status_code, 200)
+        self.assertContains(response, 'dcim.manufacturer #22')
+        self.assertNotContains(response, 'dcim.manufacturer #11')
+
+        # The mapping filter narrows to one mapping's rows.
+        response = self.client.get(list_url, {'mapping_id': self.mapping_a.pk})
+        self.assertEqual(response.status_code, 200)
+        self.assertContains(response, 'dcim.manufacturer #11')
+        self.assertNotContains(response, 'dcim.manufacturer #22')
+
+
+class SyncLogListUITestCase(PluginUITestCase):
+    """The read-only sync-log list (payload/response bodies visible)."""
+
+    @classmethod
+    def setUpTestData(cls):
+        super().setUpTestData()
+        mapping = SyncMapping.objects.create(
+            name='Manufacturers to companies', connection=cls.connection,
+            netbox_content_type=ContentType.objects.get_for_model(Manufacturer),
+            inventree_endpoint='/api/company/', enabled=False,
+        )
+        synced = SyncedObject.objects.create(
+            mapping=mapping, netbox_object_id=11, inventree_pk=101,
+            status=SyncStatusChoices.SYNCED,
+        )
+        cls.entry = SyncLogEntry.objects.create(
+            synced=synced, action=SyncActionChoices.CREATE,
+            payload={'name': 'Acme', 'description': 'synced from NetBox'},
+            response_status=201, response_body='{"pk": 101, "name": "Acme"}',
+        )
+
+    def test_sync_log_renders_response_body(self):
+        list_url = reverse('plugins:netbox_inventree_sync:synclogentry_list')
+
+        response = self.client.get(list_url)
+        self.assertEqual(response.status_code, 200)
+        # The response body (and the recorded payload) appear on the page,
+        # alongside the action badge and the HTTP status. Table cells are
+        # HTML-escaped, so the JSON quotes arrive as &quot; entities.
+        self.assertContains(response, '&quot;pk&quot;: 101')
+        self.assertContains(response, 'synced from NetBox')
+        self.assertContains(response, '201')
+        self.assertContains(response, 'Create')
+
+        # The action filter excludes non-matching entries.
+        response = self.client.get(list_url, {'action': SyncActionChoices.ERROR})
+        self.assertEqual(response.status_code, 200)
+        self.assertNotContains(response, '&quot;pk&quot;: 101')
+
+
+class MappingSyncNowUITestCase(PluginUITestCase):
+    """The "Sync now" button on the mapping detail page."""
+
+    @classmethod
+    def setUpTestData(cls):
+        super().setUpTestData()
+        # Disabled: the recurring reconcile schedule must not exist, so
+        # any ReconcileJob row found after POSTing is the one-shot sync.
+        cls.mapping = SyncMapping.objects.create(
+            name='Manufacturers to companies', connection=cls.connection,
+            netbox_content_type=ContentType.objects.get_for_model(Manufacturer),
+            inventree_endpoint='/api/company/', enabled=False,
+        )
+
+    def reconcile_jobs(self):
+        return Job.objects.filter(
+            name=ReconcileJob.name,
+            object_type=ContentType.objects.get_for_model(SyncMapping),
+            object_id=self.mapping.pk,
+            interval__isnull=True,
+        )
+
+    def test_mapping_detail_sync_now_enqueues_reconcile(self):
+        sync_url = reverse('plugins:netbox_inventree_sync:syncmapping_sync', kwargs={'pk': self.mapping.pk})
+        detail_url = reverse('plugins:netbox_inventree_sync:syncmapping', kwargs={'pk': self.mapping.pk})
+
+        # The button is a POST form on the mapping detail page.
+        response = self.client.get(detail_url)
+        self.assertEqual(response.status_code, 200)
+        self.assertContains(response, 'Sync now')
+        self.assertContains(response, sync_url)
+
+        # POST enqueues one immediate ReconcileJob, flashes the success
+        # message and redirects back to the mapping detail page.
+        response = self.client.post(sync_url, follow=True)
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(len(response.redirect_chain), 1)
+        self.assertTrue(response.redirect_chain[0][0].endswith(detail_url))
+        self.assertContains(response, 'Sync scheduled')
+        jobs = self.reconcile_jobs()
+        self.assertEqual(jobs.count(), 1)
+        self.assertEqual(jobs.first().status, 'pending')
+
+        # Gate: a user with only view permission gets a 403, no job.
+        viewer = User.objects.create_user(username='mapviewer')
+        viewer.user_permissions.add(Permission.objects.get(codename='view_syncmapping'))
+        self.client.force_login(viewer)
+        response = self.client.post(sync_url)
+        self.assertEqual(response.status_code, 403)
+        self.assertEqual(self.reconcile_jobs().count(), 1)
+
+
+class ObjectPanelUITestCase(PluginUITestCase):
+    """The InvenTree panel on mapped objects' NetBox detail pages."""
+
+    @classmethod
+    def setUpTestData(cls):
+        super().setUpTestData()
+        cls.local_connection = InvenTreeInstance.objects.create(
+            name='Local InvenTree', url='http://localhost:1337',
+            api_token='local-token', enabled=True,
+        )
+        cls.mapping = SyncMapping.objects.create(
+            name='Inventory items to parts', connection=cls.local_connection,
+            netbox_content_type=ContentType.objects.get_for_model(InventoryItem),
+            inventree_endpoint='/api/part/', enabled=True,
+        )
+        # Minimal chain so the InventoryItem detail page resolves:
+        # site → manufacturer → device type → device → inventory item.
+        site = Site.objects.create(name='Panel Site', slug='panel-site')
+        manufacturer = Manufacturer.objects.create(name='Panel Manufacturer', slug='panel-manufacturer')
+        device_type = DeviceType.objects.create(
+            manufacturer=manufacturer, model='Panel Model', slug='panel-model',
+        )
+        device = Device.objects.create(
+            device_type=device_type, name='panel-device-1', site=site,
+            role=DeviceRole.objects.create(name='Panel Role', slug='panel-role'),
+        )
+        cls.item = InventoryItem.objects.create(device=device, name='panel-item-1')
+        cls.synced = SyncedObject.objects.create(
+            mapping=cls.mapping, netbox_object_id=cls.item.pk, inventree_pk=42,
+            status=SyncStatusChoices.SYNCED, last_synced_at=timezone.now(),
+        )
+
+    def test_object_panel_shows_on_inventoryitem(self):
+        response = self.client.get(reverse('dcim:inventoryitem', kwargs={'pk': self.item.pk}))
+
+        self.assertEqual(response.status_code, 200)
+        # The panel card names InvenTree, links the remote counterpart
+        # (<connection.url> + endpoint-derived path + pk) and to the
+        # plugin's synced-objects list.
+        self.assertContains(response, 'InvenTree')
+        self.assertContains(response, 'http://localhost:1337/part/42/')
+        self.assertContains(response, 'Part #42')
+        self.assertContains(response, reverse('plugins:netbox_inventree_sync:syncedobject_list'))
+
+        # A model without any enabled mapping gets no panel at all.
+        response = self.client.get(reverse('dcim:site', kwargs={'pk': Site.objects.get(slug='panel-site').pk}))
+        self.assertEqual(response.status_code, 200)
+        self.assertNotContains(response, 'http://localhost:1337/part/42/')

@@ -6,7 +6,19 @@
   <div class="row mb-3">
     <div class="col col-12 col-md-6">
       <div class="card">
-        <h5 class="card-header">Mapping</h5>
+        <h5 class="card-header d-flex justify-content-between align-items-center">
+          <span>Mapping</span>
+          {# Sync now: enqueues a one-shot reconcile job (change permission holders only — #}
+          {# the view itself enforces it with a 403). #}
+          {% if perms.netbox_inventree_sync.change_syncmapping %}
+            <form action="{% url 'plugins:netbox_inventree_sync:syncmapping_sync' pk=object.pk %}" method="post" class="mb-0">
+              {% csrf_token %}
+              <button type="submit" class="btn btn-sm btn-primary">
+                <i class="mdi mdi-sync" aria-hidden="true"></i> {% trans "Sync now" %}
+              </button>
+            </form>
+          {% endif %}
+        </h5>
         <table class="table table-hover attr-table">
           <tr>
             <th scope="row">Name</th>

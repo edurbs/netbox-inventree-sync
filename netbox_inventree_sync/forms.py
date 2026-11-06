@@ -1,4 +1,4 @@
-"""UI forms for connections and sync mappings."""
+"""UI forms for connections, sync mappings and the read-only sync lists."""
 
 from django import forms
 from django.utils.translation import gettext_lazy as _
@@ -10,13 +10,16 @@ from utilities.forms.fields import (
 )
 from utilities.forms.rendering import FieldSet
 
-from .models import InvenTreeInstance, SyncMapping
+from .choices import SyncActionChoices, SyncStatusChoices
+from .models import InvenTreeInstance, SyncLogEntry, SyncMapping, SyncedObject
 
 __all__ = (
     'InvenTreeInstanceForm',
     'InvenTreeInstanceFilterForm',
+    'SyncLogEntryFilterForm',
     'SyncMappingForm',
     'SyncMappingFilterForm',
+    'SyncedObjectFilterForm',
 )
 
 
@@ -105,4 +108,40 @@ class SyncMappingFilterForm(NetBoxModelFilterSetForm):
     fieldsets = (
         FieldSet('q', 'filter_id', name=None),
         FieldSet('connection_id', name=_('Mapping')),
+    )
+
+
+class SyncedObjectFilterForm(NetBoxModelFilterSetForm):
+    model = SyncedObject
+    status = forms.MultipleChoiceField(
+        choices=SyncStatusChoices,
+        required=False,
+        label=_('Status'),
+    )
+    mapping_id = DynamicModelMultipleChoiceField(
+        queryset=SyncMapping.objects.all(),
+        required=False,
+        label=_('Mapping'),
+    )
+    fieldsets = (
+        FieldSet('q', 'filter_id', name=None),
+        FieldSet('status', 'mapping_id', name=_('Sync')),
+    )
+
+
+class SyncLogEntryFilterForm(NetBoxModelFilterSetForm):
+    model = SyncLogEntry
+    action = forms.MultipleChoiceField(
+        choices=SyncActionChoices,
+        required=False,
+        label=_('Action'),
+    )
+    synced_id = DynamicModelMultipleChoiceField(
+        queryset=SyncedObject.objects.all(),
+        required=False,
+        label=_('Synced object'),
+    )
+    fieldsets = (
+        FieldSet('q', 'filter_id', name=None),
+        FieldSet('action', 'synced_id', name=_('Log')),
     )

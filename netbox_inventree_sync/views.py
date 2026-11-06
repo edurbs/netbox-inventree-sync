@@ -24,7 +24,8 @@ from netbox.views import generic
 from utilities.views import ObjectPermissionRequiredMixin, register_model_view
 
 from . import filtersets, forms, tables
-from .models import InvenTreeInstance, SyncFieldPair, SyncMapping
+from .jobs import ReconcileJob
+from .models import InvenTreeInstance, SyncFieldPair, SyncLogEntry, SyncMapping, SyncedObject
 from .sync.client import InvenTreeClient, InvenTreeClientError
 from .sync.compatibility import compatible
 from .sync.fields import get_netbox_fields
@@ -42,6 +43,9 @@ __all__ = (
     'SyncMappingDeleteView',
     'SyncMappingBulkDeleteView',
     'SyncMappingBuilderView',
+    'SyncMappingSyncView',
+    'SyncLogEntryListView',
+    'SyncedObjectListView',
 )
 
 
@@ -247,6 +251,37 @@ class SyncMappingBulkDeleteView(generic.BulkDeleteView):
             ]
             _report_protected_objects(request, mappings, dependent_objects)
             return redirect(self.get_return_url(request))
+
+
+@register_model_view(SyncMapping, 'sync')
+class SyncMappingSyncView(ObjectPermissionRequiredMixin, View):
+    """POST-only "Sync now": enqueue a one-shot ``ReconcileJob``.
+
+    The exact enqueue the Task 11 REST action
+    (``POST /api/plugins/netbox_inventree_sync/mappings/<id>/sync/``)
+    performs — a job with no interval that runs at the first available
+    opportunity, in addition to any recurring schedule. The button
+    itself is a small form on the mapping detail page
+    (``syncmapping.html``).
+
+    Permission gate: the mapping's *change* permission, not merely view
+    — clicking it writes through the mapping to InvenTree, so a
+    view-only user receives a 403 (and no job). GET is not served
+    (405): there is nothing to show.
+    """
+
+    queryset = SyncMapping.objects.all()
+
+    def get_required_permission(self):
+        return 'netbox_inventree_sync.change_syncmapping'
+
+    def post(self, request, *args, **kwargs):
+        # self.queryset was restricted to permitted objects by the
+        # permission mixin, so this also enforces object-level rules.
+        mapping = get_object_or_404(self.queryset, pk=kwargs['pk'])
+        ReconcileJob.enqueue(instance=mapping, mapping_id=mapping.pk, user=request.user)
+        messages.success(request, _('Sync scheduled'))
+        return redirect(mapping.get_absolute_url())
 
 
 #
@@ -518,3 +553,39 @@ class SyncMappingBuilderView(ObjectPermissionRequiredMixin, View):
             if not isinstance(entry.get('netbox_subfield', ''), str):
                 return None, '"netbox_subfield" must be a string.'
         return pairs_data, None
+
+
+#
+# Read-only sync status lists
+#
+
+
+@register_model_view(SyncedObject, 'list', path='', detail=False)
+class SyncedObjectListView(generic.ObjectListView):
+    """Every tracked link row and its status (list is read-only)."""
+
+    # select_related covers what the table's custom columns reach into
+    # (the mapping, its endpoint and content type, the connection URL);
+    # the mapped NetBox object itself is fetched per row — a primary-key
+    # query bounded by the page size.
+    queryset = SyncedObject.objects.select_related(
+        'mapping', 'mapping__connection', 'mapping__netbox_content_type',
+    )
+    filterset = filtersets.SyncedObjectFilterSet
+    filterset_form = forms.SyncedObjectFilterForm
+    table = tables.SyncedObjectTable
+    template_name = 'netbox_inventree_sync/syncedobject_list.html'
+    # Read-only: link rows are managed by the sync engine, not by hand.
+    actions = ()
+
+
+@register_model_view(SyncLogEntry, 'list', path='', detail=False)
+class SyncLogEntryListView(generic.ObjectListView):
+    """The push-attempt audit trail (list is read-only)."""
+
+    queryset = SyncLogEntry.objects.select_related('synced', 'synced__mapping')
+    filterset = filtersets.SyncLogEntryFilterSet
+    filterset_form = forms.SyncLogEntryFilterForm
+    table = tables.SyncLogEntryTable
+    template_name = 'netbox_inventree_sync/synclogentry_list.html'
+    actions = ()

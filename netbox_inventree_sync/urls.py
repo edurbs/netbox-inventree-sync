@@ -25,4 +25,9 @@ urlpatterns = (
 
     path('sync-mappings/', include(get_model_urls('netbox_inventree_sync', 'syncmapping', detail=False))),
     path('sync-mappings/<int:pk>/', include(get_model_urls('netbox_inventree_sync', 'syncmapping'))),
+
+    # Read-only status screens; neither model has detail/edit views, so
+    # only the (detail=False) list routes exist for them.
+    path('synced-objects/', include(get_model_urls('netbox_inventree_sync', 'syncedobject', detail=False))),
+    path('sync-log/', include(get_model_urls('netbox_inventree_sync', 'synclogentry', detail=False))),
 )

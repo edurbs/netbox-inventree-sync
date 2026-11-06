@@ -1,4 +1,5 @@
-"""Navigation menu: an "InvenTree Sync" submenu with the two list views."""
+"""Navigation menu: an "InvenTree Sync" submenu with connections, mappings
+and the two read-only status lists (synced objects, sync log)."""
 
 from django.utils.translation import gettext_lazy as _
 
@@ -32,6 +33,17 @@ menu = PluginMenu(
                         color=ButtonColorChoices.GREEN,
                     ),
                 ),
+            ),
+        )),
+        (_('Status'), (
+            # Read-only lists: no add buttons.
+            PluginMenuItem(
+                link='plugins:netbox_inventree_sync:syncedobject_list',
+                link_text=_('Synced objects'),
+            ),
+            PluginMenuItem(
+                link='plugins:netbox_inventree_sync:synclogentry_list',
+                link_text=_('Sync log'),
             ),
         )),
     ),
