@@ -32,8 +32,9 @@ FIELD_TYPE_MAP: tuple[tuple[type, str], ...] = (
 )
 
 # CustomField.type -> spec type. The first group is the contract map; the
-# second normalizes the remaining NetBox 4.7 CustomField types into the
-# closest contract type so no active custom field is ever dropped.
+# second normalizes the two remaining scalar NetBox 4.7 CustomField types.
+# Every other type (json, multiselect, multiobject — outside the v1
+# compatibility boundary — or anything unknown) is excluded outright.
 CUSTOM_FIELD_TYPE_MAP: dict[str, str] = {
     'text': 'text',
     'longtext': 'text',
@@ -47,9 +48,6 @@ CUSTOM_FIELD_TYPE_MAP: dict[str, str] = {
 _CUSTOM_FIELD_TYPE_FALLBACKS: dict[str, str] = {
     'decimal': 'float',
     'datetime': 'date',
-    'json': 'text',
-    'multiselect': 'text',
-    'multiobject': 'text',
 }
 
 MAX_SUBFIELD_OPTIONS = 5
@@ -83,7 +81,9 @@ def get_netbox_fields(content_type) -> list[NetboxFieldSpec]:
     many-to-many and generic foreign keys are never included — the first by
     explicit skip, the rest because ``_meta.concrete_fields`` excludes them.
     Concrete fields whose Django class has no known mapping (e.g. NetBox's
-    internal ``custom_field_data`` JSONField) are skipped as unmappable.
+    internal ``custom_field_data`` JSONField) are skipped as unmappable, and
+    custom fields of an excluded type (json, multiselect, multiobject or
+    anything unmapped) are likewise never offered.
     """
     model = content_type.model_class()
 
@@ -157,10 +157,12 @@ def _custom_field_specs(model) -> list[NetboxFieldSpec]:
 
     specs = []
     for custom_field in custom_fields:
-        spec_type = CUSTOM_FIELD_TYPE_MAP.get(
-            custom_field.type,
-            _CUSTOM_FIELD_TYPE_FALLBACKS.get(custom_field.type, 'text'),
+        spec_type = (
+            CUSTOM_FIELD_TYPE_MAP.get(custom_field.type)
+            or _CUSTOM_FIELD_TYPE_FALLBACKS.get(custom_field.type)
         )
+        if spec_type is None:
+            continue  # excluded from the v1 compatibility boundary
         pointer_model = None
         subfield_options: list[str] = []
         if spec_type == 'pointer' and custom_field.related_object_type is not None:

@@ -75,6 +75,27 @@ class NetboxFieldIntrospectionTestCase(TestCase):
         self.assertIsNone(spec.pointer_model)
         self.assertEqual(spec.subfield_options, [])
 
+    def test_excluded_custom_field_types_absent(self):
+        # json/multiselect/multiobject custom fields are outside the v1
+        # compatibility boundary: they must not be offered as mappable.
+        json_field = CustomField.objects.create(
+            name='probe_metadata',
+            type=CustomFieldTypeChoices.TYPE_JSON,
+        )
+        json_field.object_types.set([self.content_type])
+        self.addCleanup(json_field.delete)
+
+        multiselect_field = CustomField.objects.create(
+            name='probe_regions',
+            type=CustomFieldTypeChoices.TYPE_MULTISELECT,
+        )
+        multiselect_field.object_types.set([self.content_type])
+        self.addCleanup(multiselect_field.delete)
+
+        by_name = self.specs_by_name()
+        self.assertNotIn('probe_metadata', by_name)
+        self.assertNotIn('probe_regions', by_name)
+
     def test_tags_text_spec(self):
         by_name = self.specs_by_name()
 
