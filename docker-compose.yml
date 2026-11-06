@@ -1,6 +1,6 @@
-# Development backing services for the NetBox plugin only
-# (a dockerized InvenTree stack is added by a later task).
-# Values are read from .env; ports are bound to loopback only.
+# Development stack for the NetBox plugin and the InvenTree 1.7.0 test
+# instance it syncs against. Values are read from .env; ports are bound to
+# loopback only.
 name: netbox-inventree-sync
 
 services:
@@ -25,5 +25,101 @@ services:
     ports:
       - "127.0.0.1:16379:6379"
 
+  # --- InvenTree 1.7.0 (per contrib/container/docker-compose.yml at that tag) ---
+
+  inventree-db:
+    image: postgres:17-alpine
+    # internal only: no host port published
+    environment:
+      PGDATA: /var/lib/postgresql/data/pgdb
+      POSTGRES_USER: ${INVENTREE_DB_USER:-inventree}
+      POSTGRES_PASSWORD: ${INVENTREE_DB_PASSWORD:-inventree}
+      POSTGRES_DB: ${INVENTREE_DB_NAME:-inventree}
+    volumes:
+      - inventree-db-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $$POSTGRES_USER -d $$POSTGRES_DB"]
+      interval: 5s
+      timeout: 5s
+      retries: 12
+
+  inventree-redis:
+    image: redis:7-alpine
+    # internal only: no host port published
+    # Ephemeral cache (matches upstream: no disk persistence)
+    command: redis-server --save "" --appendonly no
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 5s
+      retries: 12
+
+  inventree-web:
+    image: inventree/inventree:1.7.0
+    depends_on:
+      inventree-db:
+        condition: service_healthy
+      inventree-redis:
+        condition: service_healthy
+    environment:
+      INVENTREE_DB_ENGINE: postgresql
+      INVENTREE_DB_HOST: inventree-db
+      INVENTREE_DB_PORT: "5432"
+      INVENTREE_DB_USER: ${INVENTREE_DB_USER:-inventree}
+      INVENTREE_DB_PASSWORD: ${INVENTREE_DB_PASSWORD:-inventree}
+      INVENTREE_DB_NAME: ${INVENTREE_DB_NAME:-inventree}
+      INVENTREE_CACHE_ENABLED: "True"
+      INVENTREE_CACHE_HOST: inventree-redis
+      INVENTREE_CACHE_PORT: "6379"
+      INVENTREE_SITE_URL: http://localhost:1337
+      INVENTREE_DEBUG: "False"
+      INVENTREE_LOG_LEVEL: WARNING
+      INVENTREE_PLUGINS_ENABLED: "False"
+      INVENTREE_AUTO_UPDATE: "False"
+    ports:
+      - "127.0.0.1:1337:8000"
+    volumes:
+      # Data volume must map to /home/inventree/data (config.yaml, secret key,
+      # media, static) -- shared with the worker.
+      - inventree-data:/home/inventree/data
+    healthcheck:
+      test: ["CMD-SHELL", "invoke server-health --address http://localhost:8000"]
+      interval: 20s
+      timeout: 5s
+      retries: 10
+      start_period: 60s
+
+  inventree-worker:
+    image: inventree/inventree:1.7.0
+    command: invoke worker
+    depends_on:
+      inventree-web:
+        condition: service_healthy
+    environment:
+      INVENTREE_DB_ENGINE: postgresql
+      INVENTREE_DB_HOST: inventree-db
+      INVENTREE_DB_PORT: "5432"
+      INVENTREE_DB_USER: ${INVENTREE_DB_USER:-inventree}
+      INVENTREE_DB_PASSWORD: ${INVENTREE_DB_PASSWORD:-inventree}
+      INVENTREE_DB_NAME: ${INVENTREE_DB_NAME:-inventree}
+      INVENTREE_CACHE_ENABLED: "True"
+      INVENTREE_CACHE_HOST: inventree-redis
+      INVENTREE_CACHE_PORT: "6379"
+      INVENTREE_SITE_URL: http://localhost:1337
+      INVENTREE_DEBUG: "False"
+      INVENTREE_LOG_LEVEL: WARNING
+      INVENTREE_PLUGINS_ENABLED: "False"
+      INVENTREE_AUTO_UPDATE: "False"
+    volumes:
+      - inventree-data:/home/inventree/data
+    healthcheck:
+      test: ["CMD-SHELL", "invoke worker-health"]
+      interval: 60s
+      timeout: 10s
+      retries: 3
+      start_period: 180s
+
 volumes:
   netbox-db-data:
+  inventree-db-data:
+  inventree-data:
