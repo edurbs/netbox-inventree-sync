@@ -30,7 +30,7 @@ from django.core.management import call_command
 from django.test import TestCase
 
 from core.models import Job
-from dcim.models import Manufacturer
+from dcim.models import Manufacturer, Region
 
 from netbox_inventree_sync import signals
 from netbox_inventree_sync.choices import SyncActionChoices, SyncStatusChoices
@@ -291,6 +291,27 @@ class SignalAndJobTestCase(TestCase):
 
         self.assertEqual(Job.objects.filter(name=ObjectSyncJob.name).count(), 0)
 
+    def test_mapped_plugin_model_save_never_enqueues(self):
+        """The feedback-loop skip holds even when a mapping (wrongly)
+        targets the plugin's own SyncLogEntry content type: the mapping
+        save binds its receivers, but a SyncLogEntry save still enqueues
+        zero ObjectSyncJobs."""
+        log_ct = ContentType.objects.get_for_model(SyncLogEntry)
+        SyncMapping.objects.create(
+            name='Log entries to companies',
+            connection=self.connection,
+            netbox_content_type=log_ct,
+            inventree_endpoint=ENDPOINT,
+            enabled=True,
+        )
+        # Bound (it IS a mapped content type) — the skip must come from
+        # the app-label guard, not from a missing binding.
+        self.assertIn(log_ct.pk, signals._bound)
+
+        SyncLogEntry.objects.create(action=SyncActionChoices.CREATE, payload={})
+
+        self.assertEqual(Job.objects.filter(name=ObjectSyncJob.name).count(), 0)
+
     def test_command_exit_code_on_failure(self):
         mapping = self.make_mapping(enabled=True)
         self.pair(mapping, 'name', 'name')
@@ -328,3 +349,81 @@ class SignalAndJobTestCase(TestCase):
 
         self.assertEqual(ctx.exception.code, 1)
         self.assertIn('engine exploded', errors.getvalue())
+
+
+class RequestStartedRecheckTestCase(TestCase):
+    """The request_started TTL re-check (not a one-shot bootstrap).
+
+    A one-shot flag would permanently miss, on every other worker, a
+    content type whose FIRST-EVER mapping was created in another process
+    (the mapping-save rebuild runs only in the handling worker); the TTL
+    re-check bounds that staleness window instead.
+    """
+
+    @classmethod
+    def setUpTestData(cls):
+        cls.connection = InvenTreeInstance.objects.create(
+            name='Primary InvenTree', url='http://inventree.test', api_token='test-token-xyz',
+        )
+
+    def setUp(self):
+        signals.register_receivers()
+
+    def make_enabled_mapping_without_signals(self, content_type):
+        """A mapping created the way ANOTHER process would create it:
+        bulk_create skips post_save, so no local rebuild ever runs."""
+        mapping = SyncMapping.objects.bulk_create([SyncMapping(
+            name=f'{content_type.app_label}.{content_type.model} to companies',
+            connection=self.connection,
+            netbox_content_type=content_type,
+            inventree_endpoint=ENDPOINT,
+            enabled=True,
+        )])[0]
+        return mapping
+
+    def test_request_started_binds_first_ever_mapping_created_elsewhere(self):
+        region_ct = ContentType.objects.get_for_model(Region)
+        self.make_enabled_mapping_without_signals(region_ct)
+        self.assertNotIn(region_ct.pk, signals._bound)  # nothing bound it yet
+
+        # TTL expired (fresh module state): the request re-check binds it…
+        signals._bindings_checked_at = 0.0
+        signals._handle_request_started(None)
+
+        self.assertIn(region_ct.pk, signals._bound)
+        self.assertIs(signals._bound[region_ct.pk], Region)
+
+        # …and the binding actually fires: saving a Region enqueues a job.
+        region = Region.objects.create(name='EMEA', slug='emea')
+        mapping = SyncMapping.objects.get(netbox_content_type=region_ct)
+        self.assertEqual(Job.objects.filter(
+            name=ObjectSyncJob.name, object_id=mapping.pk,
+        ).count(), 1)
+        self.assertIsNotNone(region.pk)
+
+    def test_request_started_rechecks_at_most_once_per_ttl(self):
+        signals._bindings_checked_at = 0.0
+        with mock.patch.object(
+            signals, '_rebuild_bindings', wraps=signals._rebuild_bindings,
+        ) as rebuild:
+            signals._handle_request_started(None)
+            first_checked_at = signals._bindings_checked_at
+
+            # Inside the TTL: further requests must not re-query.
+            signals._handle_request_started(None)
+            signals._handle_request_started(None)
+            self.assertEqual(rebuild.call_count, 1)
+            self.assertEqual(signals._bindings_checked_at, first_checked_at)
+
+            # Past the TTL the next request re-checks (one cheap query).
+            signals._bindings_checked_at -= signals.BINDING_RECHECK_SECONDS + 1
+            signals._handle_request_started(None)
+            self.assertEqual(rebuild.call_count, 2)
+
+    def test_request_started_failure_never_propagates(self):
+        signals._bindings_checked_at = 0.0
+        with mock.patch.object(
+            signals, '_rebuild_bindings', side_effect=RuntimeError('db gone'),
+        ):
+            with self.assertLogs('netbox_inventree_sync.signals', level='ERROR'):
+                signals._handle_request_started(None)  # must not raise

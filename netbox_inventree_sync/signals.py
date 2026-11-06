@@ -5,9 +5,11 @@ the content types of every mapping — enabled or not — and keeps those
 bindings current through three triggers: every
 :class:`~netbox_inventree_sync.models.SyncMapping` save (one cheap query
 plus set arithmetic, fully idempotent), ``post_migrate`` (fresh or
-just-migrated database), and the first request in a process (a server
-restarting with existing mappings — ``AppConfig.ready()`` may not touch the
-database, so the initial binding build is deferred off the boot path).
+just-migrated database), and requests in a process (a server restarting
+with existing mappings — ``AppConfig.ready()`` may not touch the
+database, so the initial binding build is deferred off the boot path;
+afterwards a TTL re-check keeps converging, see
+:data:`BINDING_RECHECK_SECONDS`).
 
 Bindings are ONLY an event pre-filter: each receiver re-queries the enabled
 mappings for the sender's content type at event time, so no binding can
@@ -19,8 +21,11 @@ handled the save, and ``post_migrate`` runs in only the migrate process, so
 restricting bindings to then-enabled mappings would permanently miss a
 content type on every worker that bootstrapped before a mapping for it was
 enabled. The residual staleness window — a content type's FIRST-EVER
-mapping creation, on the workers that did not handle that save — is covered
-by the creating worker's rebuild plus the recurring reconcile backstop.
+mapping creation, on the workers that did not handle that save — is closed
+from two sides: the creating worker's own rebuild, and each process's
+request-driven TTL re-check (one cheap indexed query per
+:data:`BINDING_RECHECK_SECONDS`), with the recurring reconcile as the
+final backstop.
 
 Two hard invariants:
 
@@ -33,6 +38,7 @@ Two hard invariants:
 """
 
 import logging
+from time import monotonic
 
 from django.apps import apps
 from django.contrib.contenttypes.models import ContentType
@@ -60,8 +66,14 @@ _REQUEST_STARTED_UID = f'{APP_LABEL}.request_started'
 # Module state; rebuilt by _rebuild_bindings().
 _bound: dict[int, type] = {}
 
-# One-shot flag for the per-process bootstrap on the first request.
-_bootstrapped = False
+# Monotonic timestamp of the last request-driven binding rebuild. The
+# bootstrap trigger is a TTL re-check, NOT a one-shot flag: a one-shot
+# bootstrap would permanently miss, on every other worker, a content type
+# whose first-ever mapping was created after this process bootstrapped
+# (the mapping-save rebuild runs only in the worker that handled the
+# save). At most one cheap indexed query per process per TTL window.
+_bindings_checked_at = 0.0
+BINDING_RECHECK_SECONDS = 30.0
 
 
 def register_receivers():
@@ -73,9 +85,10 @@ def register_receivers():
     "Accessing the database during app initialization" warning). When
     called from ``ready()`` the hooks alone are connected and the bindings
     converge through any of three later triggers: ``post_migrate`` (migrate
-    runs, test-database creation), the first request in the process (a
-    server restarting with existing mappings, enabled or not), or the next
-    SyncMapping save.
+    runs, test-database creation), requests in the process (the initial
+    build plus the recurring TTL re-check — a server restarting with
+    existing mappings, enabled or not, and first-ever mapping creations in
+    other processes), or the next SyncMapping save.
     """
     post_migrate.connect(_handle_post_migrate, dispatch_uid=_POST_MIGRATE_UID)
     post_save.connect(_handle_mapping_saved, sender=SyncMapping, dispatch_uid=_MAPPING_SAVED_UID)
@@ -86,7 +99,7 @@ def register_receivers():
 
 def unregister_receivers():
     """Disconnect every receiver this module connected (idempotent)."""
-    global _bootstrapped
+    global _bindings_checked_at
     post_save.disconnect(_handle_mapping_saved, sender=SyncMapping, dispatch_uid=_MAPPING_SAVED_UID)
     post_migrate.disconnect(_handle_post_migrate, dispatch_uid=_POST_MIGRATE_UID)
     request_started.disconnect(_handle_request_started, dispatch_uid=_REQUEST_STARTED_UID)
@@ -94,7 +107,7 @@ def unregister_receivers():
         post_save.disconnect(_handle_object_saved, sender=model, dispatch_uid=_save_uid(content_type_id))
         post_delete.disconnect(_handle_object_deleted, sender=model, dispatch_uid=_delete_uid(content_type_id))
     _bound.clear()
-    _bootstrapped = False
+    _bindings_checked_at = 0.0
 
 
 def _save_uid(content_type_id):
@@ -199,8 +212,8 @@ def _handle_mapping_saved(sender, instance, **kwargs):
     rebuild is idempotent and cheap, and binding a newly mapped content
     type must happen here regardless of the enabled flag. The other worker
     processes miss this rebuild (its effects reach them only through their
-    own bootstrap triggers or the recurring reconcile — see the module
-    docstring).
+    own request-driven TTL re-check or the recurring reconcile — see the
+    module docstring).
     """
     try:
         _rebuild_bindings()
@@ -219,20 +232,27 @@ def _handle_post_migrate(sender, **kwargs):
 
 
 def _handle_request_started(sender, **kwargs):
-    """First request in this process → build the initial bindings.
+    """Request in this process → refresh the bindings at most once per TTL.
 
     ``AppConfig.ready()`` may not touch the database and ``post_migrate``
-    only fires on migrate runs, so a server that restarts with existing
-    mappings — enabled or not — gets its bindings here, once per process;
-    afterwards the SyncMapping save watcher keeps them current. (RQ worker
-    processes never serve requests — and never need these bindings: they
-    run jobs, whose engine writes only the plugin's own, guarded models.)
+    only fires on migrate runs, so a process that started with stale (or
+    no) bindings converges here. A one-shot bootstrap is not enough: a
+    content type whose FIRST-EVER mapping was created in another process
+    after this one bootstrapped would never bind here — the save-triggered
+    rebuild ran only in the worker that handled the save. The TTL
+    re-check closes that window at one cheap indexed query per process per
+    :data:`BINDING_RECHECK_SECONDS` (the timestamp is updated before the
+    rebuild so even a failing query is not retried on every request; RQ
+    worker processes never serve requests — and never need these
+    bindings: they run jobs, whose engine writes only the plugin's own,
+    guarded models).
     """
-    global _bootstrapped
-    if _bootstrapped:
+    global _bindings_checked_at
+    now = monotonic()
+    if now - _bindings_checked_at < BINDING_RECHECK_SECONDS:
         return
-    _bootstrapped = True
+    _bindings_checked_at = now
     try:
         _rebuild_bindings()
     except Exception:
-        logger.exception(f'{APP_LABEL}: initial sync receiver registration failed')
+        logger.exception(f'{APP_LABEL}: periodic sync receiver registration failed')
