@@ -147,17 +147,21 @@ class InvenTreeClient:
     def match(self, endpoint: str, field: str, value) -> list[dict]:
         """Exact-match lookup: server-side filter first, search fallback second.
 
-        Some InvenTree endpoints accept ``?field=value`` filters; others only
-        support the generic fuzzy ``?search=`` parameter. When the filter is
-        rejected with HTTP 400, fall back to search and narrow to exact,
-        case-sensitive equality on ``field`` client-side.
+        Some InvenTree endpoints accept ``?field=value`` filters; others
+        only support the generic fuzzy ``?search=`` parameter. The result
+        is ALWAYS narrowed client-side to exact, case-sensitive equality
+        on ``field``: InvenTree (DRF's DjangoFilterBackend) silently
+        ignores filter parameters a endpoint does not register instead of
+        rejecting them, so the server-side pass may hand back unrelated
+        objects. Without the narrowing, one unrelated remote object
+        would be adopted as a match, and two would fail as "ambiguous".
         """
         try:
-            return self.list(endpoint, params={field: value})
+            candidates = self.list(endpoint, params={field: value})
         except InvenTreeClientError as exc:
             if exc.status != 400:
                 raise
-        candidates = self.list(endpoint, params={'search': value})
+            candidates = self.list(endpoint, params={'search': value})
         return [item for item in candidates if item.get(field) == value]
 
     # --- internals ------------------------------------------------------------

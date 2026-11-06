@@ -28,6 +28,12 @@ from rest_framework.views import APIView
 
 from netbox.api.viewsets import NetBoxModelViewSet, NetBoxReadOnlyModelViewSet
 
+from netbox_inventree_sync.filtersets import (
+    InvenTreeInstanceFilterSet,
+    SyncLogEntryFilterSet,
+    SyncMappingFilterSet,
+    SyncedObjectFilterSet,
+)
 from netbox_inventree_sync.jobs import ReconcileJob
 from netbox_inventree_sync.models import InvenTreeInstance, SyncLogEntry, SyncMapping, SyncedObject
 from netbox_inventree_sync.sync.client import InvenTreeClient, InvenTreeClientError
@@ -57,11 +63,13 @@ class InvenTreeUnavailable(APIException):
 class InvenTreeInstanceViewSet(NetBoxModelViewSet):
     queryset = InvenTreeInstance.objects.all()
     serializer_class = serializers.InvenTreeInstanceSerializer
+    filterset_class = InvenTreeInstanceFilterSet
 
 
 class SyncMappingViewSet(NetBoxModelViewSet):
     queryset = SyncMapping.objects.all()
     serializer_class = serializers.SyncMappingSerializer
+    filterset_class = SyncMappingFilterSet
 
     @extend_schema(request=None)
     @action(detail=True, methods=['post'])
@@ -85,11 +93,13 @@ class SyncMappingViewSet(NetBoxModelViewSet):
 class SyncedObjectViewSet(NetBoxReadOnlyModelViewSet):
     queryset = SyncedObject.objects.all()
     serializer_class = serializers.SyncedObjectSerializer
+    filterset_class = SyncedObjectFilterSet
 
 
 class SyncLogEntryViewSet(NetBoxReadOnlyModelViewSet):
     queryset = SyncLogEntry.objects.all()
     serializer_class = serializers.SyncLogEntrySerializer
+    filterset_class = SyncLogEntryFilterSet
 
 
 class MappableFieldsView(APIView):

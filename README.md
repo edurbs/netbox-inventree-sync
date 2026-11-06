@@ -3,30 +3,156 @@
 A NetBox plugin that synchronizes NetBox inventory data to
 [InvenTree](https://inventree.org).
 
-**Status:** scaffold only. The development environment and plugin package are
-in place; sync functionality arrives in later tasks.
+NetBox is the source of truth: mapped objects are pushed to InvenTree on
+every change (create/update via a background job, delete via remote
+deactivation — InvenTree objects are never deleted), and a recurring
+reconcile pass re-verifies every link against the live InvenTree state and
+repairs drift. Mappings pair NetBox fields with InvenTree endpoint fields
+through a type-compatibility matrix, with pointer→related pairs resolving
+depth-first through pairing mappings (e.g. Inventory Item Role → Part
+Category before the part that references it).
 
 ## Development environment
 
+One-time setup:
+
 ```bash
-./scripts/setup_netbox.sh   # clone NetBox v4.7.4, build netbox/venv, migrate, seed, install plugin
-./scripts/start.sh          # start Postgres + Redis (docker), NetBox runserver + rqworker
+./scripts/setup_netbox.sh     # clone NetBox v4.7.4, build netbox/venv, migrate, seed admin+token, install this plugin
+./scripts/setup_inventree.sh  # InvenTree 1.7 stack (docker compose), seed admin+token
 ```
 
-NetBox is then available at <http://localhost:8000> (admin / admin). The
-seeded API token is written to `.env` as `NETBOX_TOKEN`.
+Daily start (idempotent — re-running restarts the detached processes and
+picks up code changes):
 
-Requires: Python 3.12 (a uv-managed install works — see `scripts/setup_netbox.sh`),
-Docker with compose v2.
+```bash
+./scripts/start.sh            # docker compose up -d + NetBox runserver + rqworker (supervised, logs under /tmp/opencode/netbox-inventree-sync/)
+```
+
+After that:
+
+- NetBox at <http://localhost:8000> (admin / admin); its API token is
+  written to `.env` as `NETBOX_TOKEN`.
+- InvenTree at <http://localhost:1337>; its API token is written to `.env`
+  as `INVENTREE_TOKEN`.
+- The RQ worker must be running for signal-driven syncs and reconciles
+  (`start.sh` starts it; check `/api/core/background-workers/`).
+
+Requires: Python 3.12 (a uv-managed install works — see
+`scripts/setup_netbox.sh`), Docker with compose v2.
+
+## Usage walkthrough
+
+1. **Create a connection** — *Plugins → InvenTree Sync → InvenTree
+   Instances → Add*: base URL (e.g. `http://localhost:1337`) and an API
+   token of a InvenTree user with write access. The token is stored
+   server-side and never returned by the API.
+2. **Seed the starter mappings** (or add mappings by hand):
+
+   ```bash
+   netbox/venv/bin/python netbox/netbox/manage.py seed_starter_mappings --connection <id-or-name> --validate
+   ```
+
+   This creates three *disabled* mappings: Inventory Item → `/api/part/`
+   (name→name, part_id→IPN, description→description,
+   `manufacturer.name`→keywords), Manufacturer → `/api/company/`, and
+   Inventory Item Role → `/api/part/category/`, each with name→name as
+   its match (adopt) key. `--validate` checks every pair against the
+   live InvenTree field metadata.
+3. **Enable a mapping** — edit it in the UI (or `PATCH .../mappings/<id>/`
+   `{"enabled": true}`). Enabling schedules a recurring reconcile job at
+   the mapping's `reconcile_interval_minutes` (default 60); the interval
+   schedule is replaced whenever the mapping is saved with a new interval
+   and removed when the mapping is disabled.
+4. **Open the mapping builder** — the *Field pairs* tab of a mapping
+   renders both field lists (NetBox content-type fields incl. custom
+   fields and tags; the InvenTree endpoint's writable fields) with
+   incompatible pairings greyed out. Saving validates server-side
+   through the same compatibility gate as the REST API.
+5. **Sync now** — the *Sync now* button on a mapping (or
+   `POST /api/plugins/netbox_inventree_sync/mappings/<id>/sync/`)
+   enqueues a one-shot reconcile in addition to the recurring schedule.
+
+From then on, saving a mapped NetBox object enqueues a push, and deleting
+one deactivates (never deletes) the remote counterpart. Status per object:
+*Plugins → InvenTree Sync → Synced Objects*; every push attempt is logged
+in *Sync Log*.
+
+### Deterministic sync from the CLI
+
+The `inventree_sync` management command runs the production job classes
+inline (no worker round-trip) — the E2E determinism tool:
+
+```bash
+netbox/venv/bin/python netbox/netbox/manage.py inventree_sync --mapping '<name>'                     # every pending/failed link
+netbox/venv/bin/python netbox/netbox/manage.py inventree_sync --mapping '<name>' --object dcim.inventoryitem:42
+netbox/venv/bin/python netbox/netbox/manage.py inventree_sync --mapping '<name>' --reconcile
+```
+
+Exit code 1 when any processed object ended `failed`.
+
+### Reconcile intervals
+
+Each enabled mapping carries `reconcile_interval_minutes` (default 60).
+The recurring `ReconcileJob` authoritatively re-verifies every synced
+link (drift in InvenTree is overwritten, vanished remotes re-created),
+retries failed links, publishes unlinked NetBox objects through the
+mapping's match/adopt policy, and orphans links whose NetBox object is
+gone. Keep the interval short for busy catalogs (each pass GETs every
+linked remote object).
 
 ## Running plugin tests
 
+Unit suite (Django test runner, own database; hermetic — InvenTree is
+stubbed):
+
 ```bash
 NETBOX_CONFIGURATION=netbox.configuration_test \
-    netbox/venv/bin/python netbox/netbox/manage.py test netbox_inventree_sync -v 1
+    netbox/venv/bin/python netbox/netbox/manage.py test netbox_inventree_sync -v 1 --keepdb --noinput
 ```
 
-`setup_netbox.sh` provisions `netbox/netbox/netbox/configuration_test.py` for
-this: it mirrors the dev config but disables `DEBUG`, so the Django debug
-toolbar is not installed (with `DEBUG = True` every `manage.py test` run fails
-at the `debug_toolbar.E001` system check before any test executes).
+`setup_netbox.sh` provisions `netbox/netbox/netbox/configuration_test.py`
+for this: it mirrors the dev config but disables `DEBUG`, so the Django
+debug toolbar is not installed (with `DEBUG = True` every `manage.py test`
+run fails at the `debug_toolbar.E001` system check before any test
+executes).
+
+E2E suite (pytest, `tests/e2e/`) against the **live** pair — prerequisites:
+the full stack from `./scripts/start.sh` (runserver *and* rqworker) plus
+the InvenTree containers, and `NETBOX_TOKEN` / `INVENTREE_TOKEN` in `.env`
+(both written by the setup scripts):
+
+```bash
+cd netbox && ./venv/bin/python -m pytest ../tests/e2e -v
+```
+
+URLs/tokens can be overridden with `NETBOX_URL`, `NETBOX_TOKEN`,
+`INVENTREE_URL`, `INVENTREE_TOKEN` environment variables. Every test
+cleans up what it created in both systems (engine-created InvenTree
+objects included) and isolates itself with unique `e2e-<run>` name
+prefixes, so the suite can be re-run back-to-back. One scenario stops and
+restarts the `inventree-web` compose service (~90 s); the async-path
+scenario needs the RQ worker. Expect a full run to take 3–4 minutes
+(each deterministic sync boots Django once).
+
+## Troubleshooting
+
+- **Ports**: NetBox dev server on :8000, InvenTree on :1337, NetBox
+  Postgres on :15432 and Redis on :16379 (InvenTree's own Postgres/Redis
+  are not published). `docker compose ps` shows the backing services.
+- **Tokens**: both API tokens live in `.env` (written by the setup
+  scripts). The plugin connection stores its own copy of the InvenTree
+  token; if you regenerate the InvenTree token, update the connection.
+- **"Jobs cannot be assigned to this object type (… Sync Mapping)"** when
+  enabling a mapping right after a code update: NetBox caches each
+  model's supported features in the `core_objecttype` table, refreshed
+  only by the `post_migrate` signal. Run
+  `netbox/venv/bin/python netbox/netbox/manage.py migrate` once (a no-op
+  migrate is enough) to refresh it.
+- **Worker**: signal-driven syncs and reconciles need the rqworker
+  (`./scripts/start.sh`; verify via `/api/core/background-workers/`).
+  Without it, changes only sync on the next `inventree_sync` run or
+  reconcile.
+- **A mapping's field pairs don't validate**: `POST /mappings/` and the
+  builder validate against the endpoint's live OPTIONS metadata; an
+  unreachable InvenTree fails the request (502 from the builder view)
+  rather than accepting an unvalidated mapping.

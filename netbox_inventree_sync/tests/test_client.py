@@ -239,6 +239,28 @@ class InvenTreeClientTestCase(unittest.TestCase):
         self.assertEqual(hits, [{'pk': 1, 'name': 'Widget'}])
 
     @responses.activate
+    def test_match_narrows_silently_ignored_filter(self):
+        """A server that ignores an unregistered ?field= filter (DRF's
+        DjangoFilterBackend drops unknown params instead of erroring —
+        InvenTree 1.7 does this for /api/part/?name=) hands back the whole
+        collection; match() must narrow to exact matches itself or the
+        engine adopts an unrelated object / fails as spurious "ambiguous".
+        """
+        responses.add(
+            responses.GET, f'{BASE_URL}/api/part/',
+            match=[matchers.query_param_matcher({'name': 'Widget'}, strict_match=True)],
+            json=page([
+                {'pk': 1, 'name': 'Bolt'},       # unrelated
+                {'pk': 2, 'name': 'Widget'},     # the only exact match
+                {'pk': 3, 'name': 'Widget Pro'},  # not an exact match
+            ]),
+        )
+
+        hits = self.client.match('/api/part/', 'name', 'Widget')
+
+        self.assertEqual(hits, [{'pk': 2, 'name': 'Widget'}])
+
+    @responses.activate
     def test_match_falls_back_to_search_and_filters_exactly(self):
         # The ?name= filter is rejected...
         responses.add(

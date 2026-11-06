@@ -21,8 +21,11 @@ from dcim.models import InventoryItem, InventoryItemRole, Manufacturer
 from users.models import User
 
 from netbox_inventree_sync.api import views as api_views
+from netbox_inventree_sync.choices import SyncStatusChoices
 from netbox_inventree_sync.jobs import ReconcileJob
-from netbox_inventree_sync.models import InvenTreeInstance, SyncFieldPair, SyncMapping
+from netbox_inventree_sync.models import (
+    InvenTreeInstance, SyncFieldPair, SyncMapping, SyncedObject,
+)
 from netbox_inventree_sync.sync import validation
 from netbox_inventree_sync.sync.client import InvenTreeClientError, InventreeFieldSpec
 
@@ -411,3 +414,56 @@ class TokenWriteOnlyTestCase(PluginAPITestCase):
             InvenTreeInstance.objects.get(name='Secondary InvenTree').api_token,
             'another-secret',
         )
+
+
+class ViewSetFiltersTestCase(PluginAPITestCase):
+    """The model viewsets must apply their FilterSets on the REST API.
+
+    Without ``filterset_class`` NetBoxModelViewSet ignores every query
+    parameter — ``?mapping_id=`` on synced-objects would silently return
+    the whole table (found by the E2E suite against the live pair).
+    """
+
+    def test_synced_objects_filter_by_mapping_and_status(self):
+        synced_a = SyncedObject.objects.create(
+            mapping=self.manufacturer_mapping, netbox_object_id=1,
+            inventree_pk=10, status=SyncStatusChoices.SYNCED,
+        )
+        synced_b = SyncedObject.objects.create(
+            mapping=self.role_mapping, netbox_object_id=1,
+            inventree_pk=20, status=SyncStatusChoices.FAILED,
+        )
+
+        response = self.client.get(self.url('syncedobject-list'), {'mapping_id': self.manufacturer_mapping.pk})
+        self.assertEqual(response.status_code, 200, response.content)
+        self.assertEqual(
+            [row['id'] for row in response.json()['results']], [synced_a.pk],
+            '?mapping_id= must restrict the result set',
+        )
+
+        response = self.client.get(self.url('syncedobject-list'), {'status': SyncStatusChoices.FAILED})
+        self.assertEqual(response.status_code, 200, response.content)
+        self.assertEqual(
+            [row['id'] for row in response.json()['results']], [synced_b.pk],
+            '?status= must restrict the result set',
+        )
+        self.assertNotEqual(synced_a.pk, synced_b.pk)
+
+    def test_mappings_filter_by_connection(self):
+        other_connection = InvenTreeInstance.objects.create(
+            name='Other InvenTree', url='http://inventree2.test',
+            api_token='secret-token', enabled=True,
+        )
+        other_mapping = SyncMapping.objects.create(
+            name='Other mapping', connection=other_connection,
+            netbox_content_type=self.inventoryitem_ct,
+            inventree_endpoint='/api/stock/location/',
+            enabled=False,
+        )
+
+        response = self.client.get(self.url('syncmapping-list'), {'connection_id': self.connection.pk})
+        self.assertEqual(response.status_code, 200, response.content)
+        ids = {row['id'] for row in response.json()['results']}
+        self.assertIn(self.manufacturer_mapping.pk, ids)
+        self.assertIn(self.role_mapping.pk, ids)
+        self.assertNotIn(other_mapping.pk, ids, '?connection_id= must restrict the result set')
