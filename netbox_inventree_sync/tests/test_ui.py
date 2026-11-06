@@ -13,12 +13,12 @@ from django.contrib.contenttypes.models import ContentType
 from django.test import TestCase
 from django.urls import reverse
 
-from dcim.models import InventoryItem
+from dcim.models import InventoryItem, Manufacturer
 from users.models import User
 
 from netbox_inventree_sync import views
 from netbox_inventree_sync.forms import SyncMappingForm
-from netbox_inventree_sync.models import InvenTreeInstance, SyncMapping
+from netbox_inventree_sync.models import InvenTreeInstance, SyncFieldPair, SyncMapping
 from netbox_inventree_sync.sync.client import InvenTreeClientError
 
 
@@ -124,6 +124,38 @@ class MappingUITestCase(PluginUITestCase):
         self.assertIn(ContentType.objects.get_for_model(InventoryItem).pk, offered)
         self.assertNotIn(ContentType.objects.get_for_model(SyncMapping).pk, offered)
         self.assertNotIn(ContentType.objects.get_for_model(User).pk, offered)
+
+    def test_bulk_delete_protected_pairs_no_500(self):
+        # Bulk-deleting a mapping that still has field pairs is blocked by
+        # the database; NetBox's handler links the dependent objects, which
+        # fails URL resolution until the builder screen registers pair
+        # routes. The view must report the dependents instead of erroring.
+        mapping = SyncMapping.objects.create(
+            name='Protected mapping',
+            connection=self.connection,
+            netbox_content_type=ContentType.objects.get_for_model(Manufacturer),
+            inventree_endpoint='/api/company/',
+            enabled=False,
+        )
+        SyncFieldPair.objects.create(
+            mapping=mapping,
+            netbox_field='name',
+            inventree_field='name',
+            transform='none',
+        )
+
+        response = self.client.post(
+            reverse('plugins:netbox_inventree_sync:syncmapping_bulk_delete'),
+            {'pk': [mapping.pk], 'confirm': 'true', '_confirm': 'true'},
+        )
+
+        self.assertIn(response.status_code, (200, 302))
+        # The protected deletion was rolled back: the mapping survives.
+        self.assertTrue(SyncMapping.objects.filter(pk=mapping.pk).exists())
+        message = list(response.wsgi_request._messages)[0].message
+        self.assertIn('dependent objects', message)
+        self.assertIn('Protected mapping', message)
+        self.assertIn('name', message)
 
 
 class NavMenuUITestCase(PluginUITestCase):

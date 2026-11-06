@@ -126,27 +126,27 @@ class InvenTreeInstanceBulkDeleteView(generic.BulkDeleteView):
 #
 
 
-def _report_protected_objects(request, obj, dependent_objects):
+def _report_protected_objects(request, objs, dependent_objects):
     """Report a blocked deletion without linking the dependent objects.
 
     NetBox's default handler links every protected object through its
     ``get_absolute_url()``; field pairs and synced objects carry such a
     method (model layer) but no routes until the builder/status screens
     arrive, so linking them would fail URL resolution. Plain names keep
-    the delete views functional.
+    the delete views functional. Callers perform their own redirect.
     """
+    objs = list(objs)
     dependent_objects = list(dependent_objects)
     messages.error(
         request,
         mark_safe(
-            _('Unable to delete <strong>{obj}</strong>. {count} dependent objects were found: {objects}').format(
-                obj=escape(str(obj)),
+            _('Unable to delete <strong>{objects}</strong>. {count} dependent objects were found: {dependents}').format(
+                objects=', '.join(escape(str(obj)) for obj in objs),
                 count=len(dependent_objects),
-                objects=', '.join(escape(str(dependent)) for dependent in dependent_objects[:50]),
+                dependents=', '.join(escape(str(dependent)) for dependent in dependent_objects[:50]),
             )
         ),
     )
-    return redirect(obj.get_absolute_url())
 
 
 @register_model_view(SyncMapping, 'list', path='', detail=False)
@@ -187,7 +187,8 @@ class SyncMappingDeleteView(generic.ObjectDeleteView):
     def _handle_protected_objects(self, obj, protected_objects, request, exc):
         # GET/confirm path: NetBox links protected objects here (see
         # _report_protected_objects for why that must not happen yet).
-        return _report_protected_objects(request, obj, protected_objects)
+        _report_protected_objects(request, [obj], protected_objects)
+        return redirect(obj.get_absolute_url())
 
     def post(self, request, *args, **kwargs):
         try:
@@ -199,9 +200,10 @@ class SyncMappingDeleteView(generic.ObjectDeleteView):
             # synced objects, which have no routes yet. Nothing has been
             # deleted at that point; report the dependents without links.
             obj = self.get_object(**kwargs)
-            return _report_protected_objects(
-                request, obj, list(obj.field_pairs.all()) + list(obj.synced_objects.all()),
+            _report_protected_objects(
+                request, [obj], list(obj.field_pairs.all()) + list(obj.synced_objects.all()),
             )
+            return redirect(obj.get_absolute_url())
 
 
 @register_model_view(SyncMapping, 'bulk_delete', path='delete', detail=False)
@@ -209,3 +211,28 @@ class SyncMappingBulkDeleteView(generic.BulkDeleteView):
     queryset = SyncMapping.objects.all()
     filterset = filtersets.SyncMappingFilterSet
     table = tables.SyncMappingTable
+
+    def post(self, request, **kwargs):
+        try:
+            return super().post(request, **kwargs)
+        except NoReverseMatch:
+            # Same protection as SyncMappingDeleteView.post(): a protected
+            # mapping aborts the whole (atomic) bulk deletion and NetBox's
+            # handler then fails URL resolution while linking the pairs /
+            # synced objects, which have no routes yet. Nothing has been
+            # deleted; report the dependents without links.
+            if request.POST.get('_all'):
+                qs = self.queryset.model.objects.all()
+                if self.filterset is not None:
+                    qs = self.filterset(request.GET, qs, request=request).qs
+                pk_list = qs.only('pk').values_list('pk', flat=True)
+            else:
+                pk_list = request.POST.getlist('pk')
+            mappings = self.queryset.filter(pk__in=pk_list)
+            dependent_objects = [
+                dependent
+                for mapping in mappings
+                for dependent in list(mapping.field_pairs.all()) + list(mapping.synced_objects.all())
+            ]
+            _report_protected_objects(request, mappings, dependent_objects)
+            return redirect(self.get_return_url(request))
