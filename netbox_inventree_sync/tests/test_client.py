@@ -227,28 +227,41 @@ class InvenTreeClientTestCase(unittest.TestCase):
     # --- match -------------------------------------------------------------------
 
     @responses.activate
-    def test_match_uses_filter_param(self):
+    def test_match_sends_filter_and_search_together(self):
+        """The filter request carries the exact ``?field=`` filter AND the
+        fuzzy ``?search=`` term together: whichever the server honors
+        narrows the result (intersection), and the client still narrows to
+        exact equality itself.
+        """
         responses.add(
             responses.GET, f'{BASE_URL}/api/part/',
-            match=[matchers.query_param_matcher({'name': 'Widget'}, strict_match=True)],
+            match=[matchers.query_param_matcher(
+                {'name': 'Widget', 'search': 'Widget'}, strict_match=True,
+            )],
             json=page([{'pk': 1, 'name': 'Widget'}]),
         )
 
         hits = self.client.match('/api/part/', 'name', 'Widget')
 
         self.assertEqual(hits, [{'pk': 1, 'name': 'Widget'}])
+        url = responses.calls[0].request.url
+        self.assertIn('name=Widget', url)
+        self.assertIn('search=Widget', url)
 
     @responses.activate
-    def test_match_narrows_silently_ignored_filter(self):
-        """A server that ignores an unregistered ?field= filter (DRF's
-        DjangoFilterBackend drops unknown params instead of erroring —
-        InvenTree 1.7 does this for /api/part/?name=) hands back the whole
-        collection; match() must narrow to exact matches itself or the
-        engine adopts an unrelated object / fails as spurious "ambiguous".
+    def test_match_narrows_when_server_ignores_both_params(self):
+        """A server that ignores the filter param AND the search param
+        (DRF's DjangoFilterBackend drops unknown params instead of
+        erroring — InvenTree 1.7 does this for /api/part/?name=) hands
+        back the whole collection; match() must narrow to exact matches
+        itself or the engine adopts an unrelated object / fails as
+        spurious "ambiguous".
         """
         responses.add(
             responses.GET, f'{BASE_URL}/api/part/',
-            match=[matchers.query_param_matcher({'name': 'Widget'}, strict_match=True)],
+            match=[matchers.query_param_matcher(
+                {'name': 'Widget', 'search': 'Widget'}, strict_match=True,
+            )],
             json=page([
                 {'pk': 1, 'name': 'Bolt'},       # unrelated
                 {'pk': 2, 'name': 'Widget'},     # the only exact match
@@ -261,14 +274,65 @@ class InvenTreeClientTestCase(unittest.TestCase):
         self.assertEqual(hits, [{'pk': 2, 'name': 'Widget'}])
 
     @responses.activate
-    def test_match_falls_back_to_search_and_filters_exactly(self):
-        # The ?name= filter is rejected...
+    def test_match_ignored_filter_with_search_narrows_to_one_request(self):
+        """The InvenTree 1.7 /api/part/ reality: ``?name=`` is silently
+        ignored (no 400, so the search fallback never fires) while
+        ``?search=`` narrows server-side. Sending both together keeps a
+        match lookup at ONE HTTP call instead of paginating the whole
+        catalog client-side — past MAX_PAGES every match-keyed create
+        would die with 'pagination exceeded'.
+        """
         responses.add(
             responses.GET, f'{BASE_URL}/api/part/',
-            match=[matchers.query_param_matcher({'name': 'Widget'}, strict_match=True)],
+            match=[matchers.query_param_matcher(
+                {'name': 'Widget', 'search': 'Widget'}, strict_match=True,
+            )],
+            json=page([{'pk': 2, 'name': 'Widget'}, {'pk': 3, 'name': 'Widget Pro'}]),
+        )
+
+        hits = self.client.match('/api/part/', 'name', 'Widget')
+
+        # Exact result (fuzzy 'Widget Pro' narrowed away client-side)...
+        self.assertEqual(hits, [{'pk': 2, 'name': 'Widget'}])
+        # ...at the cost of exactly ONE request: no full-catalog
+        # pagination, and the pagination cap was never approached.
+        self.assertEqual(len(responses.calls), 1)
+
+    @responses.activate
+    def test_match_search_narrowing_stays_far_below_pagination_cap(self):
+        """Even when the search-narrowed result still spans pages, the
+        traversal completes well under MAX_PAGES — the cap only guards
+        the degenerate no-server-narrowing case."""
+        combined = {'name': 'Widget', 'search': 'Widget'}
+        responses.add(
+            responses.GET, f'{BASE_URL}/api/part/',
+            match=[matchers.query_param_matcher(combined, strict_match=True)],
+            json=page([{'pk': 2, 'name': 'Widget'}],
+                      next_url=f'{BASE_URL}/api/part/?name=Widget&search=Widget&page=2'),
+        )
+        responses.add(
+            responses.GET, f'{BASE_URL}/api/part/',
+            match=[matchers.query_param_matcher({**combined, 'page': '2'}, strict_match=True)],
+            json=page([{'pk': 4, 'name': 'Widget'}]),
+        )
+
+        hits = self.client.match('/api/part/', 'name', 'Widget')
+
+        self.assertEqual([hit['pk'] for hit in hits], [2, 4])
+        self.assertEqual(len(responses.calls), 2)
+        self.assertLess(len(responses.calls), InvenTreeClient.MAX_PAGES)
+
+    @responses.activate
+    def test_match_falls_back_to_search_and_filters_exactly(self):
+        # The combined request is rejected (the endpoint dislikes ?name=)...
+        responses.add(
+            responses.GET, f'{BASE_URL}/api/part/',
+            match=[matchers.query_param_matcher(
+                {'name': 'Widget', 'search': 'Widget'}, strict_match=True,
+            )],
             status=400, json={'detail': 'Invalid filter'},
         )
-        # ...so the client retries with ?search= (fuzzy) and narrows itself.
+        # ...so the client retries with ?search= alone (fuzzy) and narrows itself.
         responses.add(
             responses.GET, f'{BASE_URL}/api/part/',
             match=[matchers.query_param_matcher({'search': 'Widget'}, strict_match=True)],

@@ -27,8 +27,14 @@ from .conftest import (
 
 
 def find_part(inventree_api, inventree_url, **params):
-    """First InvenTree part matching exact-field ``params`` (InvenTree
-    supports exact ``?IPN=``/``?name=`` filters), or None."""
+    """First InvenTree part matching exact-field ``params``.
+
+    Note ``?IPN=`` is a registered exact filter on ``/api/part/`` while
+    ``?name=`` is silently ignored by InvenTree 1.7 (see
+    ``InvenTreeClient.match``); prefer ``IPN`` lookups here — a ``name``
+    lookup would scan the whole first page, which is enough for the tiny
+    E2E catalogs but is NOT an exact server-side filter.
+    """
     parts = inventree_api.get(f'{inventree_url}/api/part/', params=params, timeout=15)
     assert parts.status_code == 200, parts.text
     payload = parts.json()

@@ -145,19 +145,26 @@ class InvenTreeClient:
         return self._request_json('PATCH', self._detail_path(endpoint, pk), json_body=data)
 
     def match(self, endpoint: str, field: str, value) -> list[dict]:
-        """Exact-match lookup: server-side filter first, search fallback second.
+        """Exact-match lookup, narrowed server-side AND client-side.
 
-        Some InvenTree endpoints accept ``?field=value`` filters; others
-        only support the generic fuzzy ``?search=`` parameter. The result
-        is ALWAYS narrowed client-side to exact, case-sensitive equality
-        on ``field``: InvenTree (DRF's DjangoFilterBackend) silently
-        ignores filter parameters a endpoint does not register instead of
-        rejecting them, so the server-side pass may hand back unrelated
-        objects. Without the narrowing, one unrelated remote object
-        would be adopted as a match, and two would fail as "ambiguous".
+        The first request carries the exact ``?field=`` filter AND the
+        generic fuzzy ``?search=`` term TOGETHER. InvenTree 1.7 silently
+        ignores ``?field=`` parameters an endpoint does not register
+        (``?name=`` on ``/api/part/`` is dropped, not rejected — DRF's
+        DjangoFilterBackend never errors on unknown params), so a
+        filter-only request would degrade every match lookup to
+        paginating the whole catalog client-side, past :attr:`MAX_PAGES`.
+        Whichever of the two terms the server honors narrows the result
+        (intersection semantics); the client STILL narrows to exact,
+        case-sensitive equality on ``field``, because a fuzzy search hit
+        or a silently-dropped filter can otherwise hand back unrelated
+        objects — one of which would be adopted as a match, and two of
+        which would fail as spurious "ambiguous". Endpoints that reject
+        the filter parameter outright (HTTP 400) are retried with
+        ``?search=`` alone.
         """
         try:
-            candidates = self.list(endpoint, params={field: value})
+            candidates = self.list(endpoint, params={field: value, 'search': value})
         except InvenTreeClientError as exc:
             if exc.status != 400:
                 raise
