@@ -37,7 +37,7 @@ After that:
 - The RQ worker must be running for signal-driven syncs and reconciles
   (`start.sh` starts it; check `/api/core/background-workers/`).
 
-Requires: Python 3.12 (a uv-managed install works — see
+Requires: Python 3.12+ (a uv-managed install works — see
 `scripts/setup_netbox.sh`), Docker with compose v2.
 
 ## Installing into a running production environment

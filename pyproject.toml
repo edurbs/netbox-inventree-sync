@@ -23,7 +23,7 @@ dependencies = [
 
 [project.urls]
 Homepage = "https://github.com/edurbs/netbox-inventree-sync"
-Documentation = "https://github.com/edurbs/netbox-inventree-sync/tree/main/docs"
+Documentation = "https://github.com/edurbs/netbox-inventree-sync#readme"
 Changelog = "https://github.com/edurbs/netbox-inventree-sync/releases"
 
 [project.optional-dependencies]
