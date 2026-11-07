@@ -14,6 +14,7 @@ from django.contrib import messages
 from django.core.exceptions import ValidationError as DjangoValidationError
 from django.db import transaction
 from django.shortcuts import get_object_or_404, redirect, render
+from django.db.models import ProtectedError
 from django.urls.exceptions import NoReverseMatch
 from django.utils.html import escape
 from django.utils.safestring import mark_safe
@@ -240,10 +241,13 @@ class SyncMappingBulkDeleteView(generic.BulkDeleteView):
     table = tables.SyncMappingTable
 
     def post(self, request, **kwargs):
-        # An explicit bulk delete retires these mappings: remove their
-        # sync state first so the PROTECT constraints never fire (and the
-        # dependent-linking path below stays unreachable). The
-        # NoReverseMatch backstop remains for anything unexpected.
+        # An explicit bulk delete retires these mappings: cancel their
+        # enqueued jobs and remove their sync state first so the PROTECT
+        # constraints never fire (and the dependent-linking path below
+        # stays unreachable). The backstops remain for anything
+        # unexpected (NoReverseMatch from dependent linking; a
+        # ProtectedError race if an in-flight job claims a link row
+        # between the pre-clean and the delete).
         if request.POST.get('_confirm'):
             if request.POST.get('_all'):
                 qs = self.queryset.model.objects.all()
@@ -255,11 +259,13 @@ class SyncMappingBulkDeleteView(generic.BulkDeleteView):
             from django.db import transaction
             from netbox_inventree_sync.models import SyncFieldPair, SyncedObject
             with transaction.atomic():
+                for mapping in self.queryset.filter(pk__in=pk_list):
+                    mapping._cancel_enqueued_jobs()
                 SyncedObject.objects.filter(mapping_id__in=pk_list).delete()
                 SyncFieldPair.objects.filter(mapping_id__in=pk_list).delete()
         try:
             return super().post(request, **kwargs)
-        except NoReverseMatch:
+        except (NoReverseMatch, ProtectedError):
             # Same protection as SyncMappingDeleteView.post(): a protected
             # mapping aborts the whole (atomic) bulk deletion and NetBox's
             # handler then fails URL resolution while linking the pairs /

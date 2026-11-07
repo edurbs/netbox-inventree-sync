@@ -124,3 +124,53 @@ class MappingDeletionCascadeTestCase(TestCase):
         self.assertFalse(SyncedObject.objects.exists())
         log = SyncLogEntry.objects.get()
         self.assertIsNone(log.synced)
+
+    def test_delete_cancels_enqueued_jobs(self):
+        """Deleting an enabled mapping cancels its scheduled/pending jobs.
+
+        NetBox reschedules interval jobs from handle()'s finally block
+        even when they error, so an orphaned recurring schedule would
+        resurrect itself forever (DoesNotExist each run) after the
+        mapping is gone.
+        """
+        from django.contrib.contenttypes.models import ContentType
+
+        from core.choices import JobStatusChoices
+        from core.models import Job
+        from dcim.models import Site
+        from netbox_inventree_sync.jobs import ObjectSyncJob, ReconcileJob
+
+        instance = InvenTreeInstance.objects.create(
+            name='c2', url='http://x.test', api_token='t'
+        )
+        mapping = SyncMapping(
+            name='m2',
+            connection=instance,
+            netbox_content_type=ContentType.objects.get_for_model(Site),
+            inventree_endpoint='/api/company/',
+            enabled=True,
+        )
+        with self.captureOnCommitCallbacks(execute=True):
+            mapping.save()
+        enqueued = dict(
+            status__in=JobStatusChoices.ENQUEUED_STATE_CHOICES,
+            object_id=mapping.pk,
+        )
+        self.assertTrue(
+            Job.objects.filter(name=ReconcileJob.name, **enqueued).exists(),
+            'enabling a mapping schedules its recurring reconcile',
+        )
+        ObjectSyncJob.enqueue(
+            instance=mapping, mapping_id=mapping.pk,
+            content_type_id=mapping.netbox_content_type_id, object_id=1,
+        )
+        self.assertTrue(Job.objects.filter(name=ObjectSyncJob.name, **enqueued).exists())
+
+        mapping.delete()
+
+        self.assertFalse(
+            Job.objects.filter(
+                name__in=[ReconcileJob.name, ObjectSyncJob.name], **enqueued
+            ).exists(),
+            'deleting a mapping must cancel its scheduled and pending jobs',
+        )

@@ -1,5 +1,7 @@
+from django.core.validators import MinValueValidator
 from django.db import models
 from django.urls import reverse
+from django.utils.translation import gettext_lazy as _
 
 from netbox.models import NetBoxModel
 from netbox.models.features import JobsMixin
@@ -72,6 +74,9 @@ class SyncMapping(JobsMixin, NetBoxModel):
     )
     reconcile_interval_minutes = models.PositiveSmallIntegerField(
         default=60,
+        validators=[MinValueValidator(1)],
+        help_text=_('Recurring reconcile interval in minutes (minimum 1 — '
+                    '0 would silently disable the schedule).'),
     )
     enabled = models.BooleanField(
         default=False,
@@ -129,15 +134,38 @@ class SyncMapping(JobsMixin, NetBoxModel):
 
         ``SyncedObject.mapping``/``SyncFieldPair.mapping`` are PROTECT so
         nothing is orphaned by accident, but an explicit delete (UI or
-        REST) is a deliberate retirement of the integration: clean up the
-        plugin's own rows transactionally, then delete the mapping. The
-        sync log survives (``SyncLogEntry.synced`` is SET_NULL).
+        REST) is a deliberate retirement of the integration: cancel its
+        scheduled and pending jobs (NetBox reschedules interval jobs from
+        handle()'s finally block even when they error — an orphaned
+        schedule would resurrect itself with DoesNotExist every interval),
+        clean up the plugin's own rows transactionally, then delete the
+        mapping. The sync log survives (``SyncLogEntry.synced`` is
+        SET_NULL).
         """
         from django.db import transaction
         with transaction.atomic():
+            self._cancel_enqueued_jobs()
             self.synced_objects.all().delete()
             self.field_pairs.all().delete()
             return super().delete(*args, **kwargs)
+
+    def _cancel_enqueued_jobs(self):
+        """Cancel every still-enqueued plugin job of this mapping.
+
+        Recurring and one-shot, both job classes: an enqueued job whose
+        mapping is gone just errors with ``DoesNotExist`` (and an
+        interval job would be rescheduled into that error forever).
+        ``Job.delete()`` also cancels the associated RQ entry.
+        """
+        from core.choices import JobStatusChoices
+        from core.models import Job, ObjectType
+        from netbox_inventree_sync.jobs import ObjectSyncJob, ReconcileJob
+        Job.objects.filter(
+            name__in=[ReconcileJob.name, ObjectSyncJob.name],
+            object_type=ObjectType.objects.get_for_model(SyncMapping, for_concrete_model=False),
+            object_id=self.pk,
+            status__in=JobStatusChoices.ENQUEUED_STATE_CHOICES,
+        ).delete()
 
     def _cancel_reconcile_schedule(self):
         """Delete any still-enqueued recurring reconcile jobs of this mapping."""

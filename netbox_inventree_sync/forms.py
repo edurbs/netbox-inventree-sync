@@ -69,8 +69,9 @@ class SyncMappingForm(NetBoxModelForm):
         queryset=InvenTreeInstance.objects.all(),
         label=_('Connection'),
     )
-    # Only models with change logging can be synced: the engine consumes
-    # their change log entries. The plugin's own models DO carry that
+    # Only models with change logging can be synced (they are the ones a
+    # real inventory workflow edits — and change logging keeps their
+    # history inspectable). The plugin's own models DO carry that
     # NetBoxModel feature (SyncMapping change-logs too), so the
     # app_label exclusion below IS load-bearing — without it the plugin's
     # own models would be offered as sync targets. The signal layer
@@ -98,6 +99,42 @@ class SyncMappingForm(NetBoxModelForm):
             'enabled', 'description',
         )
         # Field pairs are edited on the mapping's builder screen, not here.
+
+    def clean(self):
+        """Gate enabling (or creating enabled) on the pairing-cycle check.
+
+        The REST serializer and the builder run
+        ``validate_mapping_graph_for_write`` on every graph-changing
+        write; this form is the UI's equivalent surface and must not be
+        the loophole. Disabled mappings are not graph nodes, so the gate
+        only matters when the submitted state is enabled.
+        """
+        from django.core.exceptions import ValidationError as DjangoValidationError
+
+        from netbox_inventree_sync.sync.client import InvenTreeClientError
+        from netbox_inventree_sync.sync.validation import validate_mapping_graph_for_write
+
+        # NetBox mixins may return None from clean(); self.cleaned_data
+        # is always populated at this point.
+        cleaned_data = super().clean() or self.cleaned_data
+        if not cleaned_data.get('enabled'):
+            return cleaned_data
+
+        # Reflect the submitted state onto the instance for the graph
+        # walk (node membership depends on `enabled`); the stored pairs
+        # of an existing mapping are the pending pair set on this form.
+        self.instance.enabled = True
+        try:
+            validate_mapping_graph_for_write(self.instance)
+        except DjangoValidationError as exc:
+            raise forms.ValidationError(exc.messages, code='cycle')
+        except InvenTreeClientError as exc:
+            # The gate needs the endpoint's live field metadata; report
+            # the outage instead of accepting an unvalidated enable.
+            raise forms.ValidationError(
+                _('Cannot validate the pairing graph against InvenTree: %(error)s') % {'error': exc},
+            )
+        return cleaned_data
 
 
 class SyncMappingFilterForm(NetBoxModelFilterSetForm):

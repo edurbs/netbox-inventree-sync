@@ -17,15 +17,16 @@ class NetBoxInvenTreeSyncConfig(PluginConfig):
     menu = 'navigation.menu'
 
     def ready(self):
-        # Connect the sync signal wiring. This only connects signal hooks —
-        # no database access: Django forbids queries during app
-        # initialization, and at first boot (or while `manage.py test`
-        # builds the test database) the plugin's tables may not even exist.
-        # The actual receiver bindings (the content types of the enabled
-        # mappings) are built later, on post_migrate, on the first request
-        # in the process, or on the next mapping save — see
-        # signals.register_receivers(). The try/except stays as a guard:
-        # anything unexpected at boot must not take NetBox down.
+        # Connect the sync signal wiring. This only connects signal hooks
+        # (and may run one guarded binding build when apps are already
+        # populated — during a plain web/worker boot they are, so a
+        # single exception-guarded query happens here). At first boot (or
+        # while `manage.py test` builds the test database) the plugin's
+        # tables may not even exist, hence the guard. Whatever bindings
+        # are missed here converge later, on post_migrate, on the first
+        # request in the process (TTL re-check), or on the next mapping
+        # save — see signals.register_receivers(). Anything unexpected at
+        # boot must not take NetBox down.
         super().ready()
         try:
             from netbox_inventree_sync import signals

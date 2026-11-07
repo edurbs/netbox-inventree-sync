@@ -139,6 +139,61 @@ class ConnectionUITestCase(PluginUITestCase):
 
 class MappingUITestCase(PluginUITestCase):
 
+    def test_mapping_enable_via_ui_closes_cycle_rejected(self):
+        """Enabling a mapping through the UI edit form runs the cycle gate.
+
+        The REST serializer gates every write that can change the pairing
+        graph; the form must not be the loophole: a disabled mapping
+        holding reciprocal pointer pairs cannot be switched on from the
+        UI any more than it can via the API.
+        """
+        from dcim.models import Device, VirtualChassis
+
+        chassis_mapping = SyncMapping.objects.create(
+            name='UI cycle chassis',
+            connection=self.connection,
+            netbox_content_type=ContentType.objects.get_for_model(VirtualChassis),
+            inventree_endpoint='/api/company/',
+            enabled=True,
+        )
+        SyncFieldPair.objects.create(
+            mapping=chassis_mapping, netbox_field='master', inventree_field='category',
+        )
+        device_mapping = SyncMapping.objects.create(
+            name='UI cycle devices',
+            connection=self.connection,
+            netbox_content_type=ContentType.objects.get_for_model(Device),
+            inventree_endpoint='/api/part/',
+            enabled=False,  # legal while disabled: disabled nodes aren't checked
+        )
+        SyncFieldPair.objects.create(
+            mapping=device_mapping, netbox_field='virtual_chassis', inventree_field='category',
+        )
+
+        edit_url = reverse(
+            'plugins:netbox_inventree_sync:syncmapping_edit', kwargs={'pk': device_mapping.pk}
+        )
+        from unittest import mock as _mock
+        from netbox_inventree_sync.sync import validation
+        from netbox_inventree_sync.tests.test_api import StubInvenTreeClient
+        with _mock.patch.object(validation, 'InvenTreeClient', StubInvenTreeClient):
+            response = self.client.post(edit_url, {
+                'name': device_mapping.name,
+                'connection': self.connection.pk,
+                'netbox_content_type': ContentType.objects.get_for_model(Device).pk,
+                'inventree_endpoint': '/api/part/',
+                'match_netbox_field': '',
+                'match_inventree_field': '',
+                'reconcile_interval_minutes': 60,
+                'enabled': 'on',
+                'description': '',
+            })
+
+        self.assertEqual(response.status_code, 200, response.content)
+        self.assertContains(response, 'cycle')
+        device_mapping.refresh_from_db()
+        self.assertFalse(device_mapping.enabled)  # rejected, not saved
+
     def test_mapping_create_renders_content_type_choices(self):
         response = self.client.get(reverse('plugins:netbox_inventree_sync:syncmapping_add'))
 
@@ -199,6 +254,41 @@ class MappingUITestCase(PluginUITestCase):
         self.assertFalse(SyncedObject.objects.filter(pk=synced.pk).exists())
         log = SyncLogEntry.objects.get()
         self.assertIsNone(log.synced)  # history survives, detached
+
+    def test_bulk_delete_cancels_schedules(self):
+        # Bulk-deleting an ENABLED mapping also retires its recurring
+        # reconcile schedule — NetBox would otherwise resurrect the job
+        # (and its errors) every interval after the mapping is gone.
+        from core.choices import JobStatusChoices
+        from core.models import Job
+        from netbox_inventree_sync.jobs import ReconcileJob
+
+        mapping = SyncMapping.objects.create(
+            name='Scheduled retiree',
+            connection=self.connection,
+            netbox_content_type=ContentType.objects.get_for_model(Site),
+            inventree_endpoint='/api/company/',
+            enabled=True,
+        )
+        self.assertTrue(
+            Job.objects.filter(
+                name=ReconcileJob.name, object_id=mapping.pk,
+                status__in=JobStatusChoices.ENQUEUED_STATE_CHOICES,
+            ).exists()
+        )
+
+        response = self.client.post(
+            reverse('plugins:netbox_inventree_sync:syncmapping_bulk_delete'),
+            {'pk': [mapping.pk], 'confirm': 'true', '_confirm': 'true'},
+        )
+
+        self.assertEqual(response.status_code, 302)
+        self.assertFalse(
+            Job.objects.filter(
+                name=ReconcileJob.name, object_id=mapping.pk,
+                status__in=JobStatusChoices.ENQUEUED_STATE_CHOICES,
+            ).exists()
+        )
 
 
 class NavMenuUITestCase(PluginUITestCase):
