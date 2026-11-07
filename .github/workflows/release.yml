@@ -10,11 +10,51 @@ jobs:
     runs-on: ubuntu-latest
     permissions:
       id-token: write
+      contents: read
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
+      - uses: actions/checkout@v7.0.1
+      - uses: actions/setup-python@v7.1.0
         with:
           python-version: "3.13"
       - run: pip install build
       - run: python -m build
+      - name: Verify wheel contents
+        run: |
+          python - <<'EOF'
+          import os
+          import re
+          import sys
+          import zipfile
+          from pathlib import Path
+
+          tag = os.environ["GITHUB_REF_NAME"]
+          if not tag.startswith("v"):
+              sys.exit(f"unexpected tag name {tag!r} (expected leading 'v')")
+          expected_version = tag[1:]
+
+          pyproject = Path("pyproject.toml").read_text(encoding="utf-8")
+          match = re.search(r'^version\s*=\s*"([^"]+)"', pyproject, re.MULTILINE)
+          if not match:
+              sys.exit("could not find 'version' in pyproject.toml")
+          if match.group(1) != expected_version:
+              sys.exit(
+                  f"version mismatch: pyproject.toml has {match.group(1)!r}, "
+                  f"tag implies {expected_version!r}"
+              )
+
+          wheels = sorted(Path("dist").glob("*.whl"))
+          if len(wheels) != 1:
+              sys.exit(f"expected exactly one wheel in dist/, found {len(wheels)}")
+
+          data_files = [
+              name
+              for name in zipfile.ZipFile(wheels[0]).namelist()
+              if not name.endswith(".py") and ".dist-info/" not in name
+          ]
+          print(f"wheel {wheels[0].name} contains {len(data_files)} data file(s):")
+          for name in data_files:
+              print(f"  {name}")
+          if not data_files:
+              sys.exit("wheel contains no data files (templates/static missing)")
+          EOF
       - uses: pypa/gh-action-pypi-publish@release/v1

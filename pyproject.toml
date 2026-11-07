@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "netbox-inventree-sync"
-version = "0.1.0"
+version = "0.1.1"
 description = "Synchronize NetBox inventory data to InvenTree"
 readme = "README.md"
 requires-python = ">=3.12"
@@ -23,7 +23,7 @@ dependencies = [
 
 [project.urls]
 Homepage = "https://github.com/edurbs/netbox-inventree-sync"
-Documentation = "https://github.com/edurbs/netbox-inventree-sync/tree/main/docs"
+Documentation = "https://github.com/edurbs/netbox-inventree-sync#readme"
 Changelog = "https://github.com/edurbs/netbox-inventree-sync/releases"
 
 [project.optional-dependencies]
@@ -34,3 +34,6 @@ dev = [
 
 [tool.setuptools.packages.find]
 include = ["netbox_inventree_sync*"]
+
+[tool.setuptools.package-data]
+netbox_inventree_sync = ["templates/netbox_inventree_sync/*.html", "static/netbox_inventree_sync/js/*.js"]
