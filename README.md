@@ -77,8 +77,12 @@ Steps:
    virtualenv/containers that run NetBox):
 
    ```bash
-   pip install git+https://github.com/edurbs/netbox-inventree-sync.git
+   pip install netbox-inventree-sync
    ```
+
+   To track the project's development instead of a PyPI release, install
+   from the repository directly:
+   `pip install git+https://github.com/edurbs/netbox-inventree-sync.git`.
 
    For containerized NetBox (e.g. netbox-docker), install the package
    inside the image build (a custom `Dockerfile` extending the official
@@ -316,3 +320,14 @@ scenario needs the RQ worker. Expect a full run to take 3–4 minutes
   builder validate against the endpoint's live OPTIONS metadata; an
   unreachable InvenTree fails the request (502 from the builder view)
   rather than accepting an unvalidated mapping.
+
+## Support
+
+Issues: https://github.com/edurbs/netbox-inventree-sync/issues
+
+Before opening an issue, check [COMPATIBILITY.md](COMPATIBILITY.md) for
+the supported NetBox / InvenTree / Python version matrix.
+
+## License
+
+Released under the MIT license — see [LICENSE](LICENSE).

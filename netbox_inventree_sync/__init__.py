@@ -14,6 +14,7 @@ class NetBoxInvenTreeSyncConfig(PluginConfig):
     verbose_name = 'InvenTree Sync'
     description = 'Synchronize NetBox inventory data to InvenTree'
     version = __version__
+    min_version = '4.7'
     menu = 'navigation.menu'
 
     def ready(self):
