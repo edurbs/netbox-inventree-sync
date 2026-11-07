@@ -9,3 +9,5 @@ data/
 .env
 # build residue from `pip install -e .` (scripts/setup_netbox.sh)
 *.egg-info/
+# build residue from `python -m build`
+dist/

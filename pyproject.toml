@@ -1,5 +1,5 @@
 [build-system]
-requires = ["setuptools"]
+requires = ["setuptools>=77"]
 build-backend = "setuptools.build_meta"
 
 [project]
@@ -8,9 +8,23 @@ version = "0.1.0"
 description = "Synchronize NetBox inventory data to InvenTree"
 readme = "README.md"
 requires-python = ">=3.12"
+authors = [{ name = "Eduardo Soares", email = "edurbs@gmail.com" }]
+license = "MIT"
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Intended Audience :: System Administrators",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Topic :: System :: Systems Administration",
+]
 dependencies = [
     "requests",
 ]
+
+[project.urls]
+Homepage = "https://github.com/edurbs/netbox-inventree-sync"
+Documentation = "https://github.com/edurbs/netbox-inventree-sync/tree/main/docs"
+Changelog = "https://github.com/edurbs/netbox-inventree-sync/releases"
 
 [project.optional-dependencies]
 dev = [
