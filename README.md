@@ -80,6 +80,41 @@ one deactivates (never deletes) the remote counterpart. Status per object:
 *Plugins → InvenTree Sync → Synced Objects*; every push attempt is logged
 in *Sync Log*.
 
+## Seeing it in action
+
+The three screenshots below show one complete round trip, taken from the
+live dev stack (the seeded `admin` user's locale is pt-BR, so the NetBox
+UI is in Portuguese). The Inventory Item → Part mapping is enabled with
+the starter field pairs (name→name, part_id→IPN, description→description,
+`manufacturer.name`→keywords).
+
+**1. The modification is made in the NetBox UI** — editing the
+`Demo SFP+ 10G` inventory item and changing its *Descrição* to
+"Transceptor SFP+ 10G, 850nm — alcance 300m em OM3 (revisado no NetBox)":
+
+![NetBox: editing an inventory item's description](docs/screenshots/netbox-edit-inventory-item.png)
+
+**2. Saving enqueues the push** — the object's detail page now shows the
+*InvenTree* panel (added by the plugin) with the link's status: the part
+was pushed and is *Synced*, with the InvenTree object (`Part #83`) one
+click away:
+
+![NetBox: object detail with the InvenTree sync panel showing Synced](docs/screenshots/netbox-sync-panel.png)
+
+**3. The change is reflected in the InvenTree UI** — opening that part in
+InvenTree shows the description exactly as saved in NetBox (and the other
+mapped fields: IPN, name, and keywords carrying the manufacturer name).
+No one touched InvenTree — the background job pushed the edit within
+seconds of the save:
+
+![InvenTree: the part page showing the updated description](docs/screenshots/inventree-part-updated.png)
+
+The same happens on create (a new mapped object publishes a new InvenTree
+part) and on delete (the InvenTree object is deactivated, never deleted);
+manual edits made directly in InvenTree are overwritten by the next push
+or reconcile, since NetBox is the source of truth.
+
+
 > **Sync log retention**: `SyncLogEntry` grows unboundedly — one row per
 > push attempt, reconcile included. There is no automatic retention in
 > v1; prune old rows manually if the table grows too large
