@@ -174,7 +174,16 @@ def validate_mapping_graph_for_write(mapping: SyncMapping, pairs: list[SyncField
         connection=mapping.connection,
         enabled=True,
     ).exclude(pk=mapping.pk)
-    pair_overrides = {mapping.pk: pairs} if pairs is not None else None
+    if pairs is not None:
+        pair_overrides = {mapping.pk: pairs}
+    elif mapping.pk is None:
+        # Unsaved and no pairs in the write: an unsaved mapping has no
+        # stored pairs either — stand in with an empty set instead of
+        # touching its related manager (Django raises ValueError on a
+        # related filter against pk=None).
+        pair_overrides = {mapping.pk: []}
+    else:
+        pair_overrides = None
     validate_mapping_graph([*others, mapping], pair_overrides=pair_overrides)
 
 

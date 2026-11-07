@@ -311,6 +311,30 @@ class MappingWriteGraphTestCase(PluginAPITestCase):
         # Nothing was persisted.
         self.assertFalse(SyncMapping.objects.filter(name='Devices to parts').exists())
 
+    def test_create_enabled_mapping_without_pairs(self):
+        """POST an enabled mapping carrying no ``field_pairs`` at all.
+
+        ``field_pairs`` is optional; an enabled zero-pair mapping is a
+        valid (edge-free) graph node. Regression pin: the graph gate used
+        to evaluate the unsaved mapping's related manager
+        (``field_pairs.all()`` on ``pk=None``) and turn this legal create
+        into an unhandled ``ValueError`` (HTTP 500).
+        """
+        payload = self.mapping_payload(
+            name='Bare enabled mapping',
+            netbox_content_type='dcim.device',
+            enabled=True,
+        )
+        del payload['field_pairs']
+
+        with mock.patch.object(validation, 'InvenTreeClient', StubInvenTreeClient):
+            response = self.client.post(self.url('syncmapping-list'), payload, format='json')
+
+        self.assertEqual(response.status_code, 201, response.content)
+        mapping = SyncMapping.objects.get(name='Bare enabled mapping')
+        self.assertTrue(mapping.enabled)
+        self.assertEqual(mapping.field_pairs.count(), 0)
+
 
 class MappingWriteOutageTestCase(PluginAPITestCase):
     """Mapping writes while InvenTree is down return 502, not 500."""
