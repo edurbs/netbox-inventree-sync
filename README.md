@@ -82,11 +82,21 @@ in *Sync Log*.
 
 ## Seeing it in action
 
-The three screenshots below show one complete round trip, taken from the
+The screenshots below show how the application works, taken from the
 live dev stack (the seeded `admin` user's locale is pt-BR, so the NetBox
-UI is in Portuguese). The Inventory Item → Part mapping is enabled with
-the starter field pairs (name→name, part_id→IPN, description→description,
-`manufacturer.name`→keywords).
+UI is in Portuguese). First, the mapping's **field-pair builder**: NetBox
+fields on the left, the InvenTree endpoint's fields on the right, linked
+pairs with type badges — and options whose types don't accept the
+selected NetBox field are greyed out (the helper line under the selects
+says so; the server enforces it on save). This example maps
+Manufacturer → `/api/company/` with `name→name` and
+`description→description`:
+
+![NetBox: the field-pair builder with linked pairs and type badges](docs/screenshots/netbox-mapping-builder.png)
+
+Next, one complete round trip of a sync under the Inventory Item → Part
+mapping (starter field pairs: name→name, part_id→IPN,
+description→description, `manufacturer.name`→keywords).
 
 **1. The modification is made in the NetBox UI** — editing the
 `Demo SFP+ 10G` inventory item and changing its *Descrição* to
@@ -113,6 +123,13 @@ The same happens on create (a new mapped object publishes a new InvenTree
 part) and on delete (the InvenTree object is deactivated, never deleted);
 manual edits made directly in InvenTree are overwritten by the next push
 or reconcile, since NetBox is the source of truth.
+
+Every link is visible under *Plugins → InvenTree Sync → Synced Objects*,
+with per-object status, the InvenTree counterpart one click away, and the
+last error (if any) — here showing green *Synced* rows alongside orange
+*Orphaned* ones (links whose NetBox object was deleted):
+
+![NetBox: the Synced Objects list with status badges](docs/screenshots/netbox-synced-objects.png)
 
 
 > **Sync log retention**: `SyncLogEntry` grows unboundedly — one row per
