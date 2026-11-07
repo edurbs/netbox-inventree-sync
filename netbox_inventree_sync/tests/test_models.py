@@ -166,6 +166,18 @@ class MappingDeletionCascadeTestCase(TestCase):
         )
         self.assertTrue(Job.objects.filter(name=ObjectSyncJob.name, **enqueued).exists())
 
+        # Snapshot the queue identities BEFORE the delete: the deletion
+        # removes the Job rows themselves, so asserting against the rows
+        # afterwards would be vacuous.
+        import django_rq
+
+        queued = list(
+            Job.objects.filter(
+                name__in=[ReconcileJob.name, ObjectSyncJob.name], **enqueued
+            ).values_list('job_id', 'queue_name')
+        )
+        self.assertEqual(len(queued), 2, 'both job classes were enqueued')
+
         mapping.delete()
 
         self.assertFalse(
@@ -174,16 +186,22 @@ class MappingDeletionCascadeTestCase(TestCase):
             ).exists(),
             'deleting a mapping must cancel its scheduled and pending jobs',
         )
-        # …and the cancellation reaches the queue itself: the orphaned RQ
-        # entries (which carry the job and its run kwargs BY VALUE) must
-        # be gone, not just the database rows.
+        # …and the cancellation reaches the queue itself. The dev stack's
+        # live worker shares the 'default' queue and may consume an entry
+        # mid-test (terminal status) — what must never survive deletion
+        # is a RUNNABLE entry for a worker to pick up and resurrect.
         import django_rq
 
-        for name in (ReconcileJob.name, ObjectSyncJob.name):
-            for job in Job.objects.filter(name=name, object_id=mapping.pk):
-                self.assertIsNone(
-                    django_rq.get_queue(job.queue_name).fetch_job(str(job.job_id))
-                )
+        for job_id, queue_name in queued:
+            rq_job = django_rq.get_queue(queue_name).fetch_job(str(job_id))
+            if rq_job is None:
+                continue  # fully removed — the ideal outcome
+            status = str(getattr(rq_job.get_status(), 'value', rq_job.get_status())).lower()
+            self.assertNotIn(
+                status, ('queued', 'scheduled', 'started', 'active'),
+                f'queue entry {job_id} must be cancelled (or consumed), never left runnable '
+                f'(status: {status})',
+            )
 
     def test_mapping_job_handle_retires_orphaned_schedule(self):
         """A job whose mapping vanished mid-flight is retired, not rescheduled.

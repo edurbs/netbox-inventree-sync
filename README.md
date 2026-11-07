@@ -194,7 +194,7 @@ mapping (starter field pairs: name→name, part_id→IPN,
 description→description, `manufacturer.name`→keywords).
 
 **1. The modification is made in the NetBox UI** — editing the
-`Demo SFP+ 10G` inventory item and changing its *Descrição* to
+`Demo SFP+ 10G` inventory item and changing its *Description* to
 "Transceptor SFP+ 10G, 850nm — alcance 300m em OM3 (revisado no NetBox)":
 
 ![NetBox: editing an inventory item's description](docs/screenshots/netbox-edit-inventory-item.png)
