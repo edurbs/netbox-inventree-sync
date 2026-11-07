@@ -40,12 +40,95 @@ After that:
 Requires: Python 3.12 (a uv-managed install works — see
 `scripts/setup_netbox.sh`), Docker with compose v2.
 
+## Installing into a running production environment
+
+The development setup above builds a throwaway stack. This section is for
+adding the plugin to NetBox and InvenTree installations that already run
+with real data.
+
+**What the plugin touches — and what it never touches:**
+
+- In NetBox, the plugin creates **only its own tables**
+  (`netbox_inventree_sync_*`: connections, mappings, field pairs, the
+  link table, the sync log). It never modifies, migrates or deletes any
+  existing NetBox table, and it never writes to NetBox objects — the
+  engine only *reads* mapped objects.
+- InvenTree is contacted **exclusively through its REST API** with a
+  token you configure. The plugin never connects to InvenTree's database.
+- The InvenTree side is never deleted from: removing a NetBox object
+  *deactivates* its remote counterpart. Existing InvenTree parts are
+  adopted through match keys only when the match is unambiguous
+  (`name`→`name` by default); anything ambiguous or blank is flagged for
+  manual review and left untouched.
+
+Consequently, installing — or removing — the plugin cannot lose data in
+either system. Still, take a standard backup before any production
+change (`pg_dump` of the NetBox database at minimum).
+
+Steps:
+
+1. **Backup** — `pg_dump` the NetBox database (and InvenTree's, if you
+   want the extra comfort).
+2. **Create an InvenTree API token** for a dedicated service user with
+   write access limited to what you plan to sync (parts, companies,
+   categories). The token is stored in NetBox's database (plaintext at
+   rest, write-only over the API — treat your DB backups accordingly).
+3. **Install the package into NetBox's Python environment** (the same
+   virtualenv/containers that run NetBox):
+
+   ```bash
+   pip install git+https://github.com/edurbs/netbox-inventree-sync.git
+   ```
+
+   For containerized NetBox (e.g. netbox-docker), install the package
+   inside the image build (a custom `Dockerfile` extending the official
+   image with the `pip install` above) so it survives recreation.
+4. **Enable the plugin** in `configuration.py` (no plugin settings are
+   required):
+
+   ```python
+   PLUGINS = ['netbox_inventree_sync']
+   ```
+
+5. **Migrate and collect static files** — this only creates the plugin's
+   own tables:
+
+   ```bash
+   python manage.py migrate
+   python manage.py collectstatic --no-input
+   ```
+
+6. **Restart every NetBox process — including the RQ worker(s)**. The
+   web processes serve the plugin's UI; the workers execute the sync
+   jobs. A worker that was not restarted will not know the plugin
+   exists.
+7. **Roll out gradually**: create the connection, run
+   `seed_starter_mappings --connection <name> --validate` (everything is
+   created *disabled*), review the pairs in the builder, then enable one
+   mapping and watch *Synced Objects* / *Sync Log*. Be aware of the
+   first-reconcile note below: enabling a mapping publishes every
+   mapped-but-unlinked NetBox object, so on a large catalog the first
+   pass is long.
+
+**Rollback / removal:** disable all mappings (this cancels their
+recurring schedules and stops event-driven pushes), remove the plugin
+from `PLUGINS`, restart the processes. Optionally drop the plugin's
+tables or simply delete its rows — no NetBox inventory data is involved.
+InvenTree keeps whatever was synced (deactivated items stay
+deactivated); simply delete or reactivate them there if you retire the
+integration.
+
 ## Usage walkthrough
 
 1. **Create a connection** — *Plugins → InvenTree Sync → InvenTree
    Instances → Add*: base URL (e.g. `http://localhost:1337`) and an API
    token of a InvenTree user with write access. The token is stored
-   server-side and never returned by the API.
+   server-side and never returned by the API. The edit form offers a
+   *Test connection* probe (the token field stays blank on edit —
+   leaving it blank keeps the stored token):
+
+   ![NetBox: connection edit form with the Test connection button](docs/screenshots/netbox-connection-form.png)
+
 2. **Seed the starter mappings** (or add mappings by hand):
 
    ```bash
@@ -57,23 +140,35 @@ Requires: Python 3.12 (a uv-managed install works — see
    `manufacturer.name`→keywords), Manufacturer → `/api/company/`, and
    Inventory Item Role → `/api/part/category/`, each with name→name as
    its match (adopt) key. `--validate` checks every pair against the
-   live InvenTree field metadata.
+   live InvenTree field metadata. After seeding, the Mappings list shows
+   all three (✔/✗ in the *Enabled* column):
+
+   ![NetBox: the seeded starter mappings, all disabled except one](docs/screenshots/netbox-seeded-mappings.png)
+
 3. **Enable a mapping** — edit it in the UI (or `PATCH .../mappings/<id>/`
    `{"enabled": true}`). Enabling schedules a recurring reconcile job at
    the mapping's `reconcile_interval_minutes` (default 60); the interval
    schedule is replaced whenever the mapping is saved with a new interval
-   and removed when the mapping is disabled.
+   and removed when the mapping is disabled:
+
+   ![NetBox: mapping edit form with the Enabled checkbox](docs/screenshots/netbox-mapping-enable.png)
+
 4. **Open the mapping builder** — the *Field pairs* tab of a mapping
    renders both field lists (NetBox content-type fields incl. custom
    fields and tags; the InvenTree endpoint's writable fields) with
    incompatible pairings greyed out. Saving validates server-side
-   through the same compatibility gate as the REST API.
+   through the same compatibility gate as the REST API:
+
+   ![NetBox: the field-pair builder with both field lists](docs/screenshots/netbox-mapping-builder.png)
+
 5. **Sync now** — the *Sync now* button on a mapping (or
    `POST /api/plugins/netbox_inventree_sync/mappings/<id>/sync/`)
    enqueues a one-shot reconcile in addition to the recurring schedule.
    This works on *disabled* mappings too (deliberate): the action runs
    regardless of the `enabled` flag, so a mapping can be exercised once
-   before its schedule and event-driven pushes are turned on.
+   before its schedule and event-driven pushes are turned on:
+
+   ![NetBox: mapping detail page with the Sync now button](docs/screenshots/netbox-sync-now.png)
 
 From then on, saving a mapped NetBox object enqueues a push, and deleting
 one deactivates (never deletes) the remote counterpart. Status per object:
