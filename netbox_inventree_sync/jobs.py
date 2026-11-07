@@ -1,6 +1,6 @@
 """Background jobs carrying the sync engine through NetBox's job machinery.
 
-Two :class:`~netbox.jobs.JobRunner` subclasses: ``ObjectSyncJob`` pushes
+Two :class:`~netbox.jobs.JobRunner` subclasses (via a shared :class:`MappingJob` guard that retires jobs whose mapping is gone — see its docstring): ``ObjectSyncJob`` pushes
 (or, on delete, deactivates) one mapped NetBox object, and ``ReconcileJob``
 drives one full
 :meth:`~netbox_inventree_sync.sync.engine.SyncEngine.reconcile_mapping`
@@ -32,7 +32,36 @@ def build_engine(connection):
     return SyncEngine(connection)
 
 
-class ObjectSyncJob(JobRunner):
+class MappingJob(JobRunner):
+    """Shared guard for jobs whose ``mapping_id`` must still exist.
+
+    NetBox's ``JobRunner.handle`` reschedules interval jobs from its
+    ``finally`` block *unconditionally* — even when ``run()`` errored —
+    so a job whose mapping was deleted mid-flight (or after its schedule
+    slipped past cancellation) would resurrect itself with
+    ``DoesNotExist`` every interval, forever, each successor detached
+    from the mapping. This guard retires such jobs cleanly instead: no
+    run, no successor.
+    """
+
+    class Meta:
+        name = 'InvenTree Sync'
+
+    @classmethod
+    def handle(cls, job, *args, **kwargs):
+        mapping_id = kwargs.get('mapping_id', job.object_id)
+        if mapping_id is not None and not SyncMapping.objects.filter(pk=mapping_id).exists():
+            from core.choices import JobStatusChoices
+            job.start()
+            job.terminate(
+                status=JobStatusChoices.STATUS_FAILED,
+                error=f'Sync mapping {mapping_id} no longer exists; schedule retired.',
+            )
+            return
+        return super().handle(job, *args, **kwargs)
+
+
+class ObjectSyncJob(MappingJob):
     """Push one mapped NetBox object, or deactivate its remote counterpart.
 
     ``deleted=False`` runs the engine's ``sync_object`` (create/adopt/
@@ -64,7 +93,7 @@ class ObjectSyncJob(JobRunner):
         )
 
 
-class ReconcileJob(JobRunner):
+class ReconcileJob(MappingJob):
     """Re-verify and repair every link of one mapping against InvenTree.
 
     Runs the engine's authoritative three-pass reconcile (verify synced

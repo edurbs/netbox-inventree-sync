@@ -178,14 +178,14 @@ in *Sync Log*.
 ## Seeing it in action
 
 The screenshots below show how the application works, taken from the
-live dev stack (the seeded `admin` user's locale is pt-BR, so the NetBox
-UI is in Portuguese). First, the mapping's **field-pair builder**: NetBox
+live dev stack. First, the mapping's **field-pair builder**: NetBox
 fields on the left, the InvenTree endpoint's fields on the right, linked
 pairs with type badges — and options whose types don't accept the
 selected NetBox field are greyed out (the helper line under the selects
-says so; the server enforces it on save). This example maps
-Manufacturer → `/api/company/` with `name→name` and
-`description→description`:
+says so; the server enforces it on save). This example is the starter
+Inventory Item → Part mapping (name→name, part_id→IPN,
+description→description, and the manufacturer pointer rendered as text
+into keywords):
 
 ![NetBox: the field-pair builder with linked pairs and type badges](docs/screenshots/netbox-mapping-builder.png)
 

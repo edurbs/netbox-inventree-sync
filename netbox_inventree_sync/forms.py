@@ -117,12 +117,20 @@ class SyncMappingForm(NetBoxModelForm):
         # NetBox mixins may return None from clean(); self.cleaned_data
         # is always populated at this point.
         cleaned_data = super().clean() or self.cleaned_data
+        if self.errors:  # field-level errors already collected
+            return cleaned_data
         if not cleaned_data.get('enabled'):
             return cleaned_data
 
-        # Reflect the submitted state onto the instance for the graph
-        # walk (node membership depends on `enabled`); the stored pairs
-        # of an existing mapping are the pending pair set on this form.
+        # Reflect the submitted graph-relevant state onto the instance
+        # before the walk: on ADD the instance is unsaved with no FKs
+        # yet (clean() runs before construct_instance), and on EDIT a
+        # compound post (enable + new endpoint/type/connection) must be
+        # validated against what is being submitted, not the stale
+        # persisted state — the REST gate validates exactly that.
+        for field in ('connection', 'netbox_content_type', 'inventree_endpoint'):
+            if field in cleaned_data:
+                setattr(self.instance, field, cleaned_data[field])
         self.instance.enabled = True
         try:
             validate_mapping_graph_for_write(self.instance)

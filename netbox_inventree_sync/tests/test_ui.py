@@ -139,6 +139,39 @@ class ConnectionUITestCase(PluginUITestCase):
 
 class MappingUITestCase(PluginUITestCase):
 
+    def test_mapping_add_with_enabled_no_500(self):
+        """Creating an ENABLED mapping through the Add form works.
+
+        The form's cycle gate runs before construct_instance, so the
+        unsaved instance has no FKs yet — the gate must reflect the
+        submitted connection/type/endpoint instead of dereferencing
+        None (which 500'd the Add form when 'enabled' was checked).
+        """
+        from unittest import mock as _mock
+
+        from dcim.models import Site
+        from netbox_inventree_sync.sync import validation
+        from netbox_inventree_sync.tests.test_api import StubInvenTreeClient
+
+        add_url = reverse('plugins:netbox_inventree_sync:syncmapping_add')
+        with _mock.patch.object(validation, 'InvenTreeClient', StubInvenTreeClient):
+            response = self.client.post(add_url, {
+                'name': 'UI-born enabled mapping',
+                'connection': self.connection.pk,
+                'netbox_content_type': ContentType.objects.get_for_model(Site).pk,
+                'inventree_endpoint': '/api/company/',
+                'match_netbox_field': '',
+                'match_inventree_field': '',
+                'reconcile_interval_minutes': 60,
+                'enabled': 'on',
+                'description': '',
+            })
+
+        self.assertEqual(response.status_code, 302, response.content)
+        self.assertTrue(
+            SyncMapping.objects.filter(name='UI-born enabled mapping', enabled=True).exists()
+        )
+
     def test_mapping_enable_via_ui_closes_cycle_rejected(self):
         """Enabling a mapping through the UI edit form runs the cycle gate.
 

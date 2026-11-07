@@ -174,3 +174,50 @@ class MappingDeletionCascadeTestCase(TestCase):
             ).exists(),
             'deleting a mapping must cancel its scheduled and pending jobs',
         )
+        # …and the cancellation reaches the queue itself: the orphaned RQ
+        # entries (which carry the job and its run kwargs BY VALUE) must
+        # be gone, not just the database rows.
+        import django_rq
+
+        for name in (ReconcileJob.name, ObjectSyncJob.name):
+            for job in Job.objects.filter(name=name, object_id=mapping.pk):
+                self.assertIsNone(
+                    django_rq.get_queue(job.queue_name).fetch_job(str(job.job_id))
+                )
+
+    def test_mapping_job_handle_retires_orphaned_schedule(self):
+        """A job whose mapping vanished mid-flight is retired, not rescheduled.
+
+        NetBox's JobRunner.handle reschedules interval jobs even after an
+        errored run — a job surviving its mapping (e.g. claimed by a
+        worker just before deletion) would otherwise resurrect itself
+        with DoesNotExist every interval, each successor detached from
+        the mapping. The MappingJob guard retires it: no run, no
+        successor.
+        """
+        from core.choices import JobStatusChoices
+        from core.models import Job, ObjectType
+        from netbox_inventree_sync.jobs import ReconcileJob
+
+        ghost_pk = (SyncMapping.objects.order_by('-pk').first().pk if SyncMapping.objects.exists() else 0) + 9999
+        job = Job.objects.create(
+            name=ReconcileJob.name,
+            object_type=ObjectType.objects.get_for_model(SyncMapping, for_concrete_model=False),
+            object_id=ghost_pk,
+            status=JobStatusChoices.STATUS_PENDING,
+            interval=60,
+            job_id='0199cccc-dead-beef-9999-000000000001',
+        )
+
+        ReconcileJob.handle(job, mapping_id=ghost_pk)
+
+        job.refresh_from_db()
+        self.assertEqual(job.status, JobStatusChoices.STATUS_FAILED)
+        self.assertIn('no longer exists', job.error)
+        self.assertFalse(
+            Job.objects.filter(
+                name=ReconcileJob.name,
+                status__in=JobStatusChoices.ENQUEUED_STATE_CHOICES,
+            ).exclude(pk=job.pk).exists(),
+            'no successor may be scheduled for a retired mapping',
+        )

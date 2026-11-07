@@ -155,17 +155,20 @@ class SyncMapping(JobsMixin, NetBoxModel):
         Recurring and one-shot, both job classes: an enqueued job whose
         mapping is gone just errors with ``DoesNotExist`` (and an
         interval job would be rescheduled into that error forever).
-        ``Job.delete()`` also cancels the associated RQ entry.
+        Deleted per-instance — ``Job.delete()`` (unlike a queryset
+        delete) also cancels the associated RQ entry.
         """
         from core.choices import JobStatusChoices
         from core.models import Job, ObjectType
         from netbox_inventree_sync.jobs import ObjectSyncJob, ReconcileJob
-        Job.objects.filter(
+        jobs = Job.objects.filter(
             name__in=[ReconcileJob.name, ObjectSyncJob.name],
             object_type=ObjectType.objects.get_for_model(SyncMapping, for_concrete_model=False),
             object_id=self.pk,
             status__in=JobStatusChoices.ENQUEUED_STATE_CHOICES,
-        ).delete()
+        )
+        for job in jobs:
+            job.delete()
 
     def _cancel_reconcile_schedule(self):
         """Delete any still-enqueued recurring reconcile jobs of this mapping."""
