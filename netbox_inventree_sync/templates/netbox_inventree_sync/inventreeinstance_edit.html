@@ -1,0 +1,15 @@
+{% extends 'generic/object_edit.html' %}
+{% load i18n %}
+
+{% comment %}
+  Connection add/edit form. Adds the "Test connection" submit next to
+  the standard buttons: the view probes the InvenTree server with the
+  current form values and reports the result without saving anything.
+{% endcomment %}
+
+{% block buttons %}
+  {{ block.super }}
+  <button type="submit" name="test_connection" value="1" class="btn btn-warning">
+    <i class="mdi mdi-lan-connect" aria-hidden="true"></i> {% trans "Test connection" %}
+  </button>
+{% endblock buttons %}

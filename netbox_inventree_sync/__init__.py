@@ -1,0 +1,41 @@
+"""NetBox plugin: synchronize NetBox inventory data to InvenTree."""
+
+import logging
+
+from netbox.plugins import PluginConfig
+
+__version__ = '0.1.0'
+
+logger = logging.getLogger('netbox_inventree_sync')
+
+
+class NetBoxInvenTreeSyncConfig(PluginConfig):
+    name = 'netbox_inventree_sync'
+    verbose_name = 'InvenTree Sync'
+    description = 'Synchronize NetBox inventory data to InvenTree'
+    version = __version__
+    menu = 'navigation.menu'
+
+    def ready(self):
+        # Connect the sync signal wiring. This only connects signal hooks
+        # (and may run one guarded binding build when apps are already
+        # populated — during a plain web/worker boot they are, so a
+        # single exception-guarded query happens here). At first boot (or
+        # while `manage.py test` builds the test database) the plugin's
+        # tables may not even exist, hence the guard. Whatever bindings
+        # are missed here converge later, on post_migrate, on the first
+        # request in the process (TTL re-check), or on the next mapping
+        # save — see signals.register_receivers(). Anything unexpected at
+        # boot must not take NetBox down.
+        super().ready()
+        try:
+            from netbox_inventree_sync import signals
+            signals.register_receivers()
+        except Exception:
+            logger.exception(
+                'netbox_inventree_sync: signal receiver hooks not connected; '
+                'they will be connected on the next migrate or first request'
+            )
+
+
+config = NetBoxInvenTreeSyncConfig

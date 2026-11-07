@@ -1,2 +1,11 @@
 .worktrees/
 .vscode/
+
+# netbox clone + virtualenv created by scripts/setup_netbox.sh
+netbox/
+.venv/
+*.pyc
+data/
+.env
+# build residue from `pip install -e .` (scripts/setup_netbox.sh)
+*.egg-info/

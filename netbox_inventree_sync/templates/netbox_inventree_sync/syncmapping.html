@@ -1,0 +1,73 @@
+{% extends 'generic/object.html' %}
+{% load i18n %}
+{% load render_table from django_tables2 %}
+
+{% block content %}
+  <div class="row mb-3">
+    <div class="col col-12 col-md-6">
+      <div class="card">
+        <h5 class="card-header d-flex justify-content-between align-items-center">
+          <span>Mapping</span>
+          {# Sync now: enqueues a one-shot reconcile job (change permission holders only — #}
+          {# the view itself enforces it with a 403). #}
+          {% if perms.netbox_inventree_sync.change_syncmapping %}
+            <form action="{% url 'plugins:netbox_inventree_sync:syncmapping_sync' pk=object.pk %}" method="post" class="mb-0">
+              {% csrf_token %}
+              <button type="submit" class="btn btn-sm btn-primary">
+                <i class="mdi mdi-sync" aria-hidden="true"></i> {% trans "Sync now" %}
+              </button>
+            </form>
+          {% endif %}
+        </h5>
+        <table class="table table-hover attr-table">
+          <tr>
+            <th scope="row">Name</th>
+            <td>{{ object.name }}</td>
+          </tr>
+          <tr>
+            <th scope="row">Connection</th>
+            <td>{{ object.connection|linkify }}</td>
+          </tr>
+          <tr>
+            <th scope="row">NetBox type</th>
+            <td>{{ object.netbox_content_type.app_label }}.{{ object.netbox_content_type.model }}</td>
+          </tr>
+          <tr>
+            <th scope="row">InvenTree endpoint</th>
+            <td>{{ object.inventree_endpoint }}</td>
+          </tr>
+          <tr>
+            <th scope="row">Match fields</th>
+            <td>{{ object.match_netbox_field|placeholder }} &rarr; {{ object.match_inventree_field|placeholder }}</td>
+          </tr>
+          <tr>
+            <th scope="row">Reconcile interval</th>
+            <td>{{ object.reconcile_interval_minutes }} minutes</td>
+          </tr>
+          <tr>
+            <th scope="row">Enabled</th>
+            <td>{% checkmark object.enabled %}</td>
+          </tr>
+          <tr>
+            <th scope="row">Description</th>
+            <td>{{ object.description|placeholder }}</td>
+          </tr>
+        </table>
+      </div>
+    </div>
+  </div>
+  <div class="row mb-3">
+    <div class="col col-md-12">
+      <div class="card">
+        <h5 class="card-header d-flex justify-content-between align-items-center">
+          <span>{% trans "Field pairs" %}</span>
+          <a href="{% url 'plugins:netbox_inventree_sync:syncmapping_builder' pk=object.pk %}"
+             class="btn btn-sm btn-primary">
+            <i class="mdi mdi-link-variant" aria-hidden="true"></i> {% trans "Field pair builder" %}
+          </a>
+        </h5>
+        {% render_table field_pairs_table %}
+      </div>
+    </div>
+  </div>
+{% endblock content %}
