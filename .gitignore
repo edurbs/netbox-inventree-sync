@@ -1,4 +1,5 @@
 .worktrees/
+.vscode/
 
 # netbox clone + virtualenv created by scripts/setup_netbox.sh
 netbox/
