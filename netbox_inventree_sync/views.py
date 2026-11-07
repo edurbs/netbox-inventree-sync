@@ -107,12 +107,20 @@ class InvenTreeInstanceEditView(generic.ObjectEditView):
         token = request.POST.get('api_token') or (obj.api_token if obj.pk else '')
         try:
             info = InvenTreeClient(url, token).test_connection()
-            messages.success(request, _('Connection to %(url)s successful: authenticated as %(user)s '
-                                        '(InvenTree %(version)s)') % {
-                'url': url,
-                'user': info.get('user'),
-                'version': info.get('version'),
-            })
+            # InvenTree 1.7's GET /api/ has no top-level user field —
+            # degrade the message instead of interpolating None.
+            if info.get('user'):
+                messages.success(request, _('Connection to %(url)s successful: authenticated as %(user)s '
+                                            '(InvenTree %(version)s)') % {
+                    'url': url,
+                    'user': info.get('user'),
+                    'version': info.get('version'),
+                })
+            else:
+                messages.success(request, _('Connection to %(url)s successful (InvenTree %(version)s)') % {
+                    'url': url,
+                    'version': info.get('version'),
+                })
         except InvenTreeClientError as exc:
             messages.error(request, _('Connection to %(url)s failed: %(error)s') % {
                 'url': url,
@@ -232,6 +240,23 @@ class SyncMappingBulkDeleteView(generic.BulkDeleteView):
     table = tables.SyncMappingTable
 
     def post(self, request, **kwargs):
+        # An explicit bulk delete retires these mappings: remove their
+        # sync state first so the PROTECT constraints never fire (and the
+        # dependent-linking path below stays unreachable). The
+        # NoReverseMatch backstop remains for anything unexpected.
+        if request.POST.get('_confirm'):
+            if request.POST.get('_all'):
+                qs = self.queryset.model.objects.all()
+                if self.filterset is not None:
+                    qs = self.filterset(request.GET, qs, request=request).qs
+                pk_list = list(qs.only('pk').values_list('pk', flat=True))
+            else:
+                pk_list = request.POST.getlist('pk')
+            from django.db import transaction
+            from netbox_inventree_sync.models import SyncFieldPair, SyncedObject
+            with transaction.atomic():
+                SyncedObject.objects.filter(mapping_id__in=pk_list).delete()
+                SyncFieldPair.objects.filter(mapping_id__in=pk_list).delete()
         try:
             return super().post(request, **kwargs)
         except NoReverseMatch:

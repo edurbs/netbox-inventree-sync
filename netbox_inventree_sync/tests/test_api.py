@@ -17,7 +17,7 @@ from django.urls import reverse
 from rest_framework.test import APIClient
 
 from core.models import Job
-from dcim.models import Device, InventoryItem, InventoryItemRole, Manufacturer, VirtualChassis
+from dcim.models import Device, InventoryItem, InventoryItemRole, Manufacturer, Region, VirtualChassis
 from users.models import User
 
 from netbox_inventree_sync.api import views as api_views
@@ -334,6 +334,36 @@ class MappingWriteGraphTestCase(PluginAPITestCase):
         mapping = SyncMapping.objects.get(name='Bare enabled mapping')
         self.assertTrue(mapping.enabled)
         self.assertEqual(mapping.field_pairs.count(), 0)
+
+    def test_delete_mapping_with_history_returns_204(self):
+        """REST delete of a mapping with sync history succeeds.
+
+        Regression pin: PROTECT'd SyncedObject rows used to make any
+        mapping with history undeletable via REST (500/ProtectedError).
+        Deletion is a deliberate retirement and cascades the sync state.
+        """
+        mapping = SyncMapping.objects.create(
+            name='Retired via REST',
+            connection=self.connection,
+            netbox_content_type=ContentType.objects.get_for_model(Region),
+            inventree_endpoint='/api/company/',
+            enabled=False,
+        )
+        SyncFieldPair.objects.create(
+            mapping=mapping, netbox_field='name', inventree_field='name'
+        )
+        SyncedObject.objects.create(
+            mapping=mapping, netbox_object_id=1, inventree_pk=2,
+            status=SyncStatusChoices.SYNCED,
+        )
+
+        response = self.client.delete(
+            self.url('syncmapping-detail', pk=mapping.pk), format='json'
+        )
+
+        self.assertEqual(response.status_code, 204, response.content)
+        self.assertFalse(SyncMapping.objects.filter(pk=mapping.pk).exists())
+        self.assertFalse(SyncedObject.objects.exists())
 
 
 class MappingWriteOutageTestCase(PluginAPITestCase):

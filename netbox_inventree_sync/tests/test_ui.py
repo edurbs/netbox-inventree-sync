@@ -113,6 +113,29 @@ class ConnectionUITestCase(PluginUITestCase):
         instance.refresh_from_db()
         self.assertEqual(instance.name, 'Secondary InvenTree')
 
+    def test_connection_success_without_user_field(self):
+        """InvenTree 1.7's GET /api/ carries no top-level user field.
+
+        The success message must degrade gracefully: version shown, no
+        literal 'None' interpolated where the username would be.
+        """
+        instance = InvenTreeInstance.objects.create(
+            name='No-User Probe', url='http://inventree3.test', api_token='token-3'
+        )
+        edit_url = reverse('plugins:netbox_inventree_sync:inventreeinstance_edit', kwargs={'pk': instance.pk})
+        stub = mock.Mock(**{'test_connection.return_value': {'version': '1.7.0'}})  # no 'user'
+        with mock.patch.object(views, 'InvenTreeClient', return_value=stub):
+            response = self.client.post(edit_url, {
+                'name': 'No-User Probe',
+                'url': 'http://inventree3.test',
+                'api_token': '',
+                'enabled': 'on',
+                'test_connection': '1',
+            })
+        self.assertEqual(response.status_code, 200, response.content)
+        self.assertContains(response, '1.7.0')
+        self.assertNotContains(response, 'None')
+
 
 class MappingUITestCase(PluginUITestCase):
 
@@ -134,13 +157,14 @@ class MappingUITestCase(PluginUITestCase):
         self.assertNotIn(ContentType.objects.get_for_model(SyncMapping).pk, offered)
         self.assertNotIn(ContentType.objects.get_for_model(User).pk, offered)
 
-    def test_bulk_delete_protected_pairs_no_500(self):
-        # Bulk-deleting a mapping that still has field pairs is blocked by
-        # the database; NetBox's handler links the dependent objects, which
-        # fails URL resolution until the builder screen registers pair
-        # routes. The view must report the dependents instead of erroring.
+    def test_bulk_delete_cascades_sync_state(self):
+        # Bulk-deleting mappings with sync history succeeds and cascades
+        # the plugin's own sync state (pairs + link rows); the sync log
+        # survives (its synced FK is SET_NULL). Previously the PROTECT on
+        # SyncedObject.mapping made any mapping with history undeletable
+        # via UI or REST.
         mapping = SyncMapping.objects.create(
-            name='Protected mapping',
+            name='Retired mapping',
             connection=self.connection,
             netbox_content_type=ContentType.objects.get_for_model(Manufacturer),
             inventree_endpoint='/api/company/',
@@ -152,19 +176,29 @@ class MappingUITestCase(PluginUITestCase):
             inventree_field='name',
             transform='none',
         )
+        synced = SyncedObject.objects.create(
+            mapping=mapping,
+            netbox_object_id=123,
+            inventree_pk=7,
+            status=SyncStatusChoices.SYNCED,
+        )
+        SyncLogEntry.objects.create(
+            synced=synced,
+            action=SyncActionChoices.CREATE,
+            payload={'name': 'x'},
+        )
 
         response = self.client.post(
             reverse('plugins:netbox_inventree_sync:syncmapping_bulk_delete'),
             {'pk': [mapping.pk], 'confirm': 'true', '_confirm': 'true'},
         )
 
-        self.assertIn(response.status_code, (200, 302))
-        # The protected deletion was rolled back: the mapping survives.
-        self.assertTrue(SyncMapping.objects.filter(pk=mapping.pk).exists())
-        message = list(response.wsgi_request._messages)[0].message
-        self.assertIn('dependent objects', message)
-        self.assertIn('Protected mapping', message)
-        self.assertIn('name', message)
+        self.assertEqual(response.status_code, 302)
+        self.assertFalse(SyncMapping.objects.filter(pk=mapping.pk).exists())
+        self.assertFalse(SyncFieldPair.objects.filter(mapping_id=mapping.pk).exists())
+        self.assertFalse(SyncedObject.objects.filter(pk=synced.pk).exists())
+        log = SyncLogEntry.objects.get()
+        self.assertIsNone(log.synced)  # history survives, detached
 
 
 class NavMenuUITestCase(PluginUITestCase):

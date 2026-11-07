@@ -124,6 +124,21 @@ class SyncMapping(JobsMixin, NetBoxModel):
         else:
             self._cancel_reconcile_schedule()
 
+    def delete(self, *args, **kwargs):
+        """Delete the mapping together with its own sync state.
+
+        ``SyncedObject.mapping``/``SyncFieldPair.mapping`` are PROTECT so
+        nothing is orphaned by accident, but an explicit delete (UI or
+        REST) is a deliberate retirement of the integration: clean up the
+        plugin's own rows transactionally, then delete the mapping. The
+        sync log survives (``SyncLogEntry.synced`` is SET_NULL).
+        """
+        from django.db import transaction
+        with transaction.atomic():
+            self.synced_objects.all().delete()
+            self.field_pairs.all().delete()
+            return super().delete(*args, **kwargs)
+
     def _cancel_reconcile_schedule(self):
         """Delete any still-enqueued recurring reconcile jobs of this mapping."""
         from core.choices import JobStatusChoices
