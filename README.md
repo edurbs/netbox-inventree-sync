@@ -131,7 +131,7 @@ integration.
    *Test connection* probe (the token field stays blank on edit —
    leaving it blank keeps the stored token):
 
-   ![NetBox: connection edit form with the Test connection button](docs/screenshots/netbox-connection-form.png)
+   ![NetBox: connection edit form with the Test connection button](https://raw.githubusercontent.com/edurbs/netbox-inventree-sync/main/docs/screenshots/netbox-connection-form.png)
 
 2. **Seed the starter mappings** (or add mappings by hand):
 
@@ -147,7 +147,7 @@ integration.
    live InvenTree field metadata. After seeding, the Mappings list shows
    all three (✔/✗ in the *Enabled* column):
 
-   ![NetBox: the seeded starter mappings, all disabled except one](docs/screenshots/netbox-seeded-mappings.png)
+   ![NetBox: the seeded starter mappings, all disabled except one](https://raw.githubusercontent.com/edurbs/netbox-inventree-sync/main/docs/screenshots/netbox-seeded-mappings.png)
 
 3. **Enable a mapping** — edit it in the UI (or `PATCH .../mappings/<id>/`
    `{"enabled": true}`). Enabling schedules a recurring reconcile job at
@@ -155,7 +155,7 @@ integration.
    schedule is replaced whenever the mapping is saved with a new interval
    and removed when the mapping is disabled:
 
-   ![NetBox: mapping edit form with the Enabled checkbox](docs/screenshots/netbox-mapping-enable.png)
+   ![NetBox: mapping edit form with the Enabled checkbox](https://raw.githubusercontent.com/edurbs/netbox-inventree-sync/main/docs/screenshots/netbox-mapping-enable.png)
 
 4. **Open the mapping builder** — the *Field pairs* tab of a mapping
    renders both field lists (NetBox content-type fields incl. custom
@@ -163,7 +163,7 @@ integration.
    incompatible pairings greyed out. Saving validates server-side
    through the same compatibility gate as the REST API:
 
-   ![NetBox: the field-pair builder with both field lists](docs/screenshots/netbox-mapping-builder.png)
+   ![NetBox: the field-pair builder with both field lists](https://raw.githubusercontent.com/edurbs/netbox-inventree-sync/main/docs/screenshots/netbox-mapping-builder.png)
 
 5. **Sync now** — the *Sync now* button on a mapping (or
    `POST /api/plugins/netbox_inventree_sync/mappings/<id>/sync/`)
@@ -172,7 +172,7 @@ integration.
    regardless of the `enabled` flag, so a mapping can be exercised once
    before its schedule and event-driven pushes are turned on:
 
-   ![NetBox: mapping detail page with the Sync now button](docs/screenshots/netbox-sync-now.png)
+   ![NetBox: mapping detail page with the Sync now button](https://raw.githubusercontent.com/edurbs/netbox-inventree-sync/main/docs/screenshots/netbox-sync-now.png)
 
 From then on, saving a mapped NetBox object enqueues a push, and deleting
 one deactivates (never deletes) the remote counterpart. Status per object:
@@ -191,7 +191,7 @@ Inventory Item → Part mapping (name→name, part_id→IPN,
 description→description, and the manufacturer pointer rendered as text
 into keywords):
 
-![NetBox: the field-pair builder with linked pairs and type badges](docs/screenshots/netbox-mapping-builder.png)
+![NetBox: the field-pair builder with linked pairs and type badges](https://raw.githubusercontent.com/edurbs/netbox-inventree-sync/main/docs/screenshots/netbox-mapping-builder.png)
 
 Next, one complete round trip of a sync under the Inventory Item → Part
 mapping (starter field pairs: name→name, part_id→IPN,
@@ -201,14 +201,14 @@ description→description, `manufacturer.name`→keywords).
 `Demo SFP+ 10G` inventory item and changing its *Description* to
 "Transceptor SFP+ 10G, 850nm — alcance 300m em OM3 (revisado no NetBox)":
 
-![NetBox: editing an inventory item's description](docs/screenshots/netbox-edit-inventory-item.png)
+![NetBox: editing an inventory item's description](https://raw.githubusercontent.com/edurbs/netbox-inventree-sync/main/docs/screenshots/netbox-edit-inventory-item.png)
 
 **2. Saving enqueues the push** — the object's detail page now shows the
 *InvenTree* panel (added by the plugin) with the link's status: the part
 was pushed and is *Synced*, with the InvenTree object (`Part #83`) one
 click away:
 
-![NetBox: object detail with the InvenTree sync panel showing Synced](docs/screenshots/netbox-sync-panel.png)
+![NetBox: object detail with the InvenTree sync panel showing Synced](https://raw.githubusercontent.com/edurbs/netbox-inventree-sync/main/docs/screenshots/netbox-sync-panel.png)
 
 **3. The change is reflected in the InvenTree UI** — opening that part in
 InvenTree shows the description exactly as saved in NetBox (and the other
@@ -216,7 +216,7 @@ mapped fields: IPN, name, and keywords carrying the manufacturer name).
 No one touched InvenTree — the background job pushed the edit within
 seconds of the save:
 
-![InvenTree: the part page showing the updated description](docs/screenshots/inventree-part-updated.png)
+![InvenTree: the part page showing the updated description](https://raw.githubusercontent.com/edurbs/netbox-inventree-sync/main/docs/screenshots/inventree-part-updated.png)
 
 The same happens on create (a new mapped object publishes a new InvenTree
 part) and on delete (the InvenTree object is deactivated, never deleted);
@@ -228,7 +228,7 @@ with per-object status, the InvenTree counterpart one click away, and the
 last error (if any) — here showing green *Synced* rows alongside orange
 *Orphaned* ones (links whose NetBox object was deleted):
 
-![NetBox: the Synced Objects list with status badges](docs/screenshots/netbox-synced-objects.png)
+![NetBox: the Synced Objects list with status badges](https://raw.githubusercontent.com/edurbs/netbox-inventree-sync/main/docs/screenshots/netbox-synced-objects.png)
 
 
 > **Sync log retention**: `SyncLogEntry` grows unboundedly — one row per
