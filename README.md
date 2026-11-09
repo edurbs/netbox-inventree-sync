@@ -325,9 +325,11 @@ scenario needs the RQ worker. Expect a full run to take 3–4 minutes
 
 Issues: https://github.com/edurbs/netbox-inventree-sync/issues
 
-Before opening an issue, check [COMPATIBILITY.md](COMPATIBILITY.md) for
-the supported NetBox / InvenTree / Python version matrix.
+Before opening an issue, check
+[COMPATIBILITY.md](https://github.com/edurbs/netbox-inventree-sync/blob/main/COMPATIBILITY.md)
+for the supported NetBox / InvenTree / Python version matrix.
 
 ## License
 
-Released under the MIT license — see [LICENSE](LICENSE).
+Released under the MIT license — see
+[LICENSE](https://github.com/edurbs/netbox-inventree-sync/blob/main/LICENSE).
