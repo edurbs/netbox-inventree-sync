@@ -1,10 +1,19 @@
 """NetBox plugin: synchronize NetBox inventory data to InvenTree."""
 
 import logging
+from importlib import metadata
 
 from netbox.plugins import PluginConfig
 
-__version__ = '0.1.0'
+try:
+    # Single source of truth: the version lives in pyproject.toml; read it
+    # from the installed package metadata (editable installs ship metadata
+    # too, so the dev/test venvs resolve it as well).
+    __version__ = metadata.version('netbox-inventree-sync')
+except metadata.PackageNotFoundError:
+    # Importing from a source tree that was never installed (no pip
+    # install, editable or otherwise) — keep the plugin importable.
+    __version__ = '0.0.0'
 
 logger = logging.getLogger('netbox_inventree_sync')
 
